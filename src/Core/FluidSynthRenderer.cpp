@@ -4,7 +4,11 @@
 //
 
 #include "FluidSynthRenderer.h"
+#include "../fb2k_sdk.h"   // console::*
 #include <fluidsynth.h>
+
+#include <cmath>
+#include <string>
 
 namespace foo_midi {
 
@@ -47,6 +51,8 @@ bool FluidSynthRenderer::init(const EngineKey& key,
 
     // ~2s release/reverb tail rendered after the player finishes.
     m_tailFramesRemaining = m_sampleRate * 2;
+    m_peak = 0.0f;
+    m_warnedSilent = false;
     return true;
 }
 
@@ -62,6 +68,12 @@ int FluidSynthRenderer::render(float* out, int frames) {
         return 0;
     }
 
+    // Track the loudest sample seen so we can flag a track that renders silence.
+    for (int i = 0, n = frames * kChannels; i < n; ++i) {
+        float a = std::fabs(out[i]);
+        if (a > m_peak) m_peak = a;
+    }
+
     if (fluid_player_get_status(m_player) == FLUID_PLAYER_DONE) {
         // Player has consumed all events; render the tail until voices die out.
         if (fluid_synth_get_active_voice_count(syn) == 0) {
@@ -71,7 +83,26 @@ int FluidSynthRenderer::render(float* out, int frames) {
             if (m_tailFramesRemaining <= 0) m_finished = true;
         }
     }
+
+    if (m_finished) warnIfSilent();
     return frames;
+}
+
+void FluidSynthRenderer::warnIfSilent() {
+    if (m_warnedSilent) return;
+    m_warnedSilent = true;
+    if (m_peak >= 1.0e-4f) return;   // clearly audible; nothing to report
+
+    std::string sf = m_engine ? m_engine->key().soundfont : std::string();
+    if (auto slash = sf.find_last_of('/'); slash != std::string::npos)
+        sf = sf.substr(slash + 1);
+
+    std::string msg =
+        "foo_tun_midi: this track rendered SILENCE with SoundFont '" + sf +
+        "'. Likely the SoundFont lacks the instrument(s) the file asks for. "
+        "For drum-pattern files, enable 'Force all channels to the drum kit' in "
+        "Preferences > Input > MIDI Player; otherwise try a different SoundFont.";
+    console::error(msg.c_str());
 }
 
 void FluidSynthRenderer::seek(uint32_t tick) {

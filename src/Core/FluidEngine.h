@@ -64,6 +64,10 @@ private:
     fluid_settings_t* m_settings = nullptr;
     fluid_synth_t* m_synth = nullptr;
     int m_sfontId = -1;
+    // Percussion program to select on bank 128 when forcing drums. Many drum
+    // SoundFonts put their kit at a program number other than 0 (e.g. a TR-909
+    // kit at program 24), so we can't assume 0. -1 = no percussion preset.
+    int m_drumProgram = 0;
 };
 
 // Process-wide cache of a single most-recently-used engine.

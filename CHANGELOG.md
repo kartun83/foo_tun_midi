@@ -4,6 +4,29 @@ All notable changes to foo_tun_midi will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.2.1] - 2026-07-01
+
+### Fixed
+
+- **Force-percussion now works with drum SoundFonts whose kit isn't at program 0.**
+  It previously hardcoded bank 128 / program 0; SoundFonts that place their kit at
+  another program (e.g. a TR-909 kit at program 24) rendered silence. The kit
+  program is now discovered from the SoundFont (program 0 preferred, else the
+  lowest present) and logged.
+
+### Added
+
+- **Descriptive console logging** to explain SoundFonts that produce no sound.
+  When a SoundFont loads, the console (**View → Console**) now reports its preset
+  count, which melodic banks it contains, and how many percussion kits (bank 128)
+  it has. Two silent-mismatch cases are called out explicitly:
+  - force-percussion is ON but the SoundFont has no percussion presets, and
+  - the SoundFont is drum-only (bank 128) but force-percussion is off.
+- A per-track warning when a track renders complete **silence**, hinting that the
+  SoundFont likely lacks the instrument(s) the file requests (catches missing
+  individual programs that the load-time summary can't).
+- SoundFont load failures now log the offending path.
+
 ## [0.2.0] - 2026-07-01
 
 ### Changed

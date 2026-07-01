@@ -46,6 +46,7 @@ public:
 private:
     void teardown();
     fluid_synth_t* synth() const;
+    void warnIfSilent();   // log a hint once if the whole track was inaudible
 
     std::shared_ptr<FluidEngine> m_engine;  // borrowed from the cache
     fluid_player_t* m_player = nullptr;
@@ -54,6 +55,11 @@ private:
     std::vector<uint8_t> m_midi;   // kept alive for the player's lifetime
     bool m_finished = false;
     int m_tailFramesRemaining = 0; // release/reverb tail after player reports done
+
+    // Silence detection: if a whole track renders inaudibly we log a hint once,
+    // to explain SoundFonts that "produce no sound" (e.g. a missing program).
+    float m_peak = 0.0f;
+    bool m_warnedSilent = false;
 };
 
 } // namespace foo_midi

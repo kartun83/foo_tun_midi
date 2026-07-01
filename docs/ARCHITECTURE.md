@@ -71,19 +71,35 @@ assume a DAW drum rack supplies the mapping. Under General MIDI only channel 10
 is percussion, so FluidSynth (correctly) renders channel 1 with its default
 patch: Acoustic Grand Piano. The files *sound like piano*, and nothing is wrong.
 
-**Handling:** `FluidSynthRenderer::init(..., bool forcePercussion)`. When set,
-after loading the SoundFont it pins every channel to the drum bank:
+**Handling:** the engine's percussion mode (`EngineKey::forcePercussion`). When
+set, after loading the SoundFont `resetForNewTrack()` pins every channel to the
+drum bank:
 
 ```cpp
 for (int ch = 0; ch < 16; ++ch) {
     fluid_synth_set_channel_type(m_synth, ch, CHANNEL_TYPE_DRUM);
-    fluid_synth_bank_select(m_synth, ch, 128);   // GM percussion bank
-    fluid_synth_program_change(m_synth, ch, 0);  // standard kit
+    fluid_synth_bank_select(m_synth, ch, 128);              // GM percussion bank
+    fluid_synth_program_change(m_synth, ch, m_drumProgram); // a kit that exists
 }
 ```
 
-`set_channel_type(DRUM)` makes any later program change the file might send stay
-within bank 128. Exposed as the "Force all channels to the drum kit" preference.
+`m_drumProgram` is **discovered from the SoundFont at load time**, not assumed to
+be 0: many drum SoundFonts place their only kit at another program number (e.g. a
+TR-909 kit at program 24), which would otherwise select a non-existent preset and
+render silence. Program 0 is used when present, else the lowest bank-128 program
+(`-1`/no-op when the SoundFont has no percussion at all). `set_channel_type(DRUM)`
+makes any later program change the file sends stay within bank 128. Exposed as the
+"Force all channels to the drum kit" preference.
+
+### Diagnostics
+
+Because SoundFonts vary wildly in what they contain, the engine logs a summary to
+the foobar2000 console (**View → Console**) on each load — preset count, melodic
+banks, percussion kit count, and (when forcing drums) the chosen kit program — and
+warns about the silent-mismatch cases (force-percussion with no drum kit;
+drum-only SoundFont with force-percussion off). `FluidSynthRenderer` additionally
+logs once if a whole track renders inaudibly, catching per-file missing programs
+the load-time summary can't predict.
 
 To inspect a file's channels/programs/notes when triaging "why does this sound
 wrong", `Scripts/midinfo.py` (a small standalone SMF event dumper) prints the

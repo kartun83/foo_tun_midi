@@ -75,6 +75,29 @@ To see what a file actually contains:
 python3 Scripts/midinfo.py path/to/file.mid
 ```
 
+## Troubleshooting: "this SoundFont is silent"
+
+Not every SoundFont contains every instrument. A drum-only SoundFont has no
+melodic patches (and vice-versa), so it plays nothing for the wrong kind of file.
+The component logs what it finds to the foobar2000 console — open
+**View → Console** and look for `foo_tun_midi:` lines. On each SoundFont load it
+prints a summary like:
+
+```
+foo_tun_midi: SoundFont 'TR-808 Drums.SF2' loaded: 12 presets; melodic banks: 0,1; percussion (bank 128): 6 kit(s); force-percussion: off
+```
+
+and warns about the two common silent cases:
+
+- force **percussion is ON but the SoundFont has no drum kit** (bank 128), or
+- the **SoundFont is drum-only** but percussion is off (melodic MIDI stays silent
+  until you enable *Force all channels to the drum kit*).
+
+If a track plays but you hear nothing, the console also logs a per-track
+"rendered SILENCE" hint. Match the SoundFont's contents to the file: drum-pattern
+files want a drum-kit SoundFont **with** force-percussion on; general MIDI wants a
+full General MIDI SoundFont like MuseScore_General.
+
 ## Scope
 
 **In scope:** SMF playback via FluidSynth + a user-selected SoundFont, for
