@@ -127,7 +127,7 @@ uint32_t SMFInfo::secondsToTick(double seconds) const {
     return e.tick + (uint32_t)(dq * (double)ppq + 0.5);
 }
 
-SMFInfo parseSMF(const uint8_t* data, size_t size) {
+SMFInfo parseSMF(const uint8_t* data, size_t size, bool keepEvents) {
     SMFInfo out;
     Reader r{ data, data + size };
 
@@ -216,20 +216,23 @@ SMFInfo parseSMF(const uint8_t* data, size_t size) {
                 // change (0xC) and channel pressure (0xD) which have 1.
                 uint8_t hi = status & 0xF0;
                 uint8_t ch = status & 0x0F;
-                if (hi == 0xC0) {              // program change
-                    tr.u8();
+                uint8_t d1 = 0, d2 = 0;
+                if (hi == 0xC0) {              // program change (1 data byte)
+                    d1 = tr.u8();
                     out.hasProgramChange = true;
-                } else if (hi == 0xD0) {       // channel pressure
-                    tr.u8();
-                } else {
-                    uint8_t d1 = tr.u8();
-                    uint8_t d2 = tr.u8();
+                } else if (hi == 0xD0) {       // channel pressure (1 data byte)
+                    d1 = tr.u8();
+                } else {                       // 2 data bytes
+                    d1 = tr.u8();
+                    d2 = tr.u8();
                     if (hi == 0x90 && d2 > 0) {  // note-on (velocity > 0)
                         out.noteCount++;
                         if (ch == 9) out.usesDrumChannel = true;
                         else if (d1 >= 35 && d1 <= 81) out.drumRangeNoteCount++;
                     }
                 }
+                if (keepEvents && tr.ok)
+                    out.events.push_back({ tick, status, d1, d2 });
             }
         }
         maxTick = std::max(maxTick, tick);
@@ -258,6 +261,15 @@ SMFInfo parseSMF(const uint8_t* data, size_t size) {
 
     if (!out.tempoMap.empty() && out.tempoMap[0].usPerQuarter > 0)
         out.initialBpm = 60e6 / (double)out.tempoMap[0].usPerQuarter;
+
+    // Merge per-track event streams into one global timeline. stable_sort keeps
+    // same-tick events in track order (matters for e.g. program-change before
+    // the note it applies to).
+    if (keepEvents)
+        std::stable_sort(out.events.begin(), out.events.end(),
+                         [](const SMFInfo::ChannelEvent& a, const SMFInfo::ChannelEvent& b) {
+                             return a.tick < b.tick;
+                         });
 
     out.valid = true;
     return out;

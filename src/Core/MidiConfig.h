@@ -22,6 +22,17 @@ static const char* const kKeySoundFontPath = "soundfont_path";
 static const char* const kKeyForcePercussion = "force_percussion";   // legacy bool
 static const char* const kKeyPercussionMode = "percussion_mode";     // 0/1/2 below
 static const char* const kKeySampleRate = "sample_rate";             // render Hz
+static const char* const kKeyEngine = "engine";                      // 0/1 below
+static const char* const kKeyClapPluginPath = "clap_plugin_path";    // .clap bundle
+static const char* const kKeyClapPluginId = "clap_plugin_id";        // plugin within it
+static const char* const kKeyClapPluginList = "clap_plugin_list";    // cached scan
+
+// Rendering backend. Only the CLAP-enabled ("Full") build exposes a choice;
+// the FluidSynth-only build ignores this and always renders with FluidSynth.
+enum Engine {
+    kEngineFluidSynth = 0,
+    kEngineClap = 1,
+};
 
 // Percussion handling mode.
 enum PercussionMode {
@@ -110,6 +121,24 @@ inline std::string soundFontPath() {
     std::string p = getConfigString(kKeySoundFontPath, kDefaultSoundFont);
     if (p.empty()) p = kDefaultSoundFont;
     return p;
+}
+
+// Selected rendering backend (validated). Meaningful only in the CLAP-enabled
+// build; the FluidSynth-only build treats everything as kEngineFluidSynth.
+inline int engine() {
+    int64_t e = getConfigInt(kKeyEngine, kEngineFluidSynth);
+    return (e == kEngineClap) ? kEngineClap : kEngineFluidSynth;
+}
+
+// Path to the .clap bundle the CLAP backend should host (empty if unset).
+inline std::string clapPluginPath() {
+    return getConfigString(kKeyClapPluginPath, "");
+}
+
+// Which plugin inside that bundle to instantiate (a bundle can host several).
+// Empty selects the first plugin in the bundle.
+inline std::string clapPluginId() {
+    return getConfigString(kKeyClapPluginId, "");
 }
 
 } // namespace midi_config

@@ -11,9 +11,11 @@
 
 #include "../fb2k_sdk.h"
 #include "../Core/SMFInfo.h"
-#include "../Core/FluidSynthRenderer.h"
+#include "../Core/IMidiRenderer.h"
+#include "../Core/RendererFactory.h"
 #include "../Core/MidiConfig.h"
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -44,7 +46,15 @@ public:
         }
         m_data.resize(total);
 
-        m_smf = parseSMF(m_data.data(), m_data.size());
+        // The CLAP-enabled build retains the channel-voice event stream so a
+        // hosted plugin can be fed; the FluidSynth-only build discards it
+        // (FluidSynth parses the SMF itself).
+#if FOO_TUN_MIDI_CLAP
+        constexpr bool kKeepEvents = true;
+#else
+        constexpr bool kKeepEvents = false;
+#endif
+        m_smf = parseSMF(m_data.data(), m_data.size(), kKeepEvents);
         if (!m_smf.valid || m_data.empty()) throw exception_io_data();
     }
 
@@ -53,7 +63,7 @@ public:
             p_info.set_length(m_smf.durationSeconds);
         }
         p_info.info_set_int("samplerate", midi_config::sampleRate());
-        p_info.info_set_int("channels", FluidSynthRenderer::kChannels);
+        p_info.info_set_int("channels", IMidiRenderer::kChannels);
         p_info.info_set("encoding", "synthesized");
         p_info.info_set("codec", "MIDI");
         if (!m_smf.valid) return;
@@ -92,27 +102,12 @@ public:
     t_filestats get_file_stats(abort_callback& a) { return m_file->get_stats(a); }
 
     void decode_initialize(unsigned /*p_flags*/, abort_callback& /*p_abort*/) {
-        EngineKey key;
-        key.soundfont = midi_config::soundFontPath();
-        key.sampleRate = midi_config::sampleRate();
-
-        // Effective percussion decision: Always forces every file; Auto forces
-        // only files that look like drum patterns misrouted off channel 10.
-        int mode = midi_config::percussionMode();
-        key.forcePercussion = (mode == midi_config::kPercAlways) ||
-            (mode == midi_config::kPercAuto && m_smf.looksLikePercussionMisrouted());
-
-        m_renderer = std::make_unique<FluidSynthRenderer>();
-        if (!m_renderer->init(key, m_data.data(), m_data.size(), m_smf.durationSeconds)) {
-            m_renderer.reset();
-            std::string msg = "foo_tun_midi: failed to initialize FluidSynth. Check that the "
-                              "SoundFont exists and is a valid .sf2/.sf3 (set it in "
-                              "Preferences > Input > MIDI Player): ";
-            msg += key.soundfont;
-            console::error(msg.c_str());
-            throw exception_io_data();
-        }
-        m_block.resize((size_t)kBlockFrames * FluidSynthRenderer::kChannels);
+        // The factory picks the backend (FluidSynth, or CLAP in the Full build)
+        // and builds its key/config from preferences, keeping this decoder
+        // backend-agnostic. It logs the specific reason on failure.
+        m_renderer = createRenderer(m_data.data(), m_data.size(), m_smf);
+        if (!m_renderer) throw exception_io_data();
+        m_block.resize((size_t)kBlockFrames * IMidiRenderer::kChannels);
     }
 
     bool decode_run(audio_chunk& p_chunk, abort_callback& /*p_abort*/) {
@@ -120,16 +115,19 @@ public:
         int frames = m_renderer->render(m_block.data(), kBlockFrames);
         if (frames <= 0) return false;
         p_chunk.set_data_32(m_block.data(), (size_t)frames,
-                            FluidSynthRenderer::kChannels, m_renderer->sampleRate());
+                            IMidiRenderer::kChannels, m_renderer->sampleRate());
         return true;
     }
 
     void decode_seek(double p_seconds, abort_callback& /*p_abort*/) {
-        if (!m_renderer) return;
-        m_renderer->seek(m_smf.secondsToTick(p_seconds), p_seconds);
+        if (m_renderer) m_renderer->seek(p_seconds);
     }
 
-    bool decode_can_seek() { return m_smf.valid; }
+    // Reflect the active backend's capability: FluidSynth seeks; CLAP does not,
+    // so foobar2000 disables the seekbar for CLAP-backed files.
+    bool decode_can_seek() {
+        return m_smf.valid && (!m_renderer || m_renderer->supportsSeek());
+    }
 
     void retag(const file_info&, abort_callback&) { throw exception_tagging_unsupported(); }
     void remove_tags(abort_callback&) { throw exception_tagging_unsupported(); }
@@ -156,7 +154,7 @@ private:
     service_ptr_t<file> m_file;
     std::vector<uint8_t> m_data;
     SMFInfo m_smf;
-    std::unique_ptr<FluidSynthRenderer> m_renderer;
+    std::unique_ptr<IMidiRenderer> m_renderer;
     std::vector<float> m_block;
 };
 

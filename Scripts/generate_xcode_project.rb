@@ -9,9 +9,17 @@ def generate_uuid
   SecureRandom.hex(12).upcase
 end
 
-# Project configuration
-PROJECT_NAME = "foo_tun_midi"
-BUNDLE_ID = "com.foobar2000.foo-tun-midi"
+# Project configuration.
+# Two build variants from one source tree, selected by the VARIANT env var:
+#   lite (default) -> foo_tun_midi        : FluidSynth only.
+#   full           -> foo_tun_midi_clap   : FluidSynth + hosted CLAP instrument.
+# The variants get distinct product names + bundle identifiers so foobar2000
+# doesn't collide them (install one or the other, not both).
+VARIANT = (ENV['VARIANT'] || 'lite').downcase
+abort "ERROR: VARIANT must be 'lite' or 'full'" unless %w[lite full].include?(VARIANT)
+CLAP = (VARIANT == 'full')
+PROJECT_NAME = CLAP ? "foo_tun_midi_clap" : "foo_tun_midi"
+BUNDLE_ID = CLAP ? "com.foobar2000.foo-tun-midi-clap" : "com.foobar2000.foo-tun-midi"
 
 # foobar2000 SDK location. Default: SDK-2025-03-07 at the repo root (run
 # Scripts/bootstrap_sdk.sh to fetch + build it). Override with FB2K_SDK_PATH.
@@ -59,6 +67,7 @@ uuid_src_group = generate_uuid
 uuid_core_group = generate_uuid
 uuid_ui_group = generate_uuid
 uuid_integration_group = generate_uuid
+uuid_clap_group = generate_uuid
 uuid_resources_group = generate_uuid
 
 # Framework references
@@ -88,10 +97,29 @@ uuid_shared_lib_ref = generate_uuid
 uuid_pfc_lib = generate_uuid
 uuid_pfc_lib_ref = generate_uuid
 
-# Collect source files
+# Collect source files. The Clap group is compiled into the Full variant only —
+# excluded from the Lite build entirely (not merely #ifdef'd out) so that binary
+# structurally cannot load a plugin.
 core_files = Dir.glob("src/Core/*.{cpp,h,mm}").map { |f| File.basename(f) }
 ui_files = Dir.glob("src/UI/*.{cpp,h,mm}").map { |f| File.basename(f) }
 integration_files = Dir.glob("src/Integration/*.{cpp,h,mm}").map { |f| File.basename(f) }
+clap_files = CLAP ? Dir.glob("src/Clap/*.{cpp,h,mm}").map { |f| File.basename(f) } : []
+
+# Source groups threaded through the build-file / file-reference / sources loops.
+src_groups = [['Core', core_files], ['UI', ui_files], ['Integration', integration_files]]
+src_groups << ['Clap', clap_files] if CLAP
+
+# Full-variant-only pbxproj fragments (empty strings in the Lite variant).
+# clap_group_def is built later, once file_ref_uuids is populated.
+clap_src_child = CLAP ? "\t\t\t\t#{uuid_clap_group} /* Clap */,\n" : ""
+# Build settings that differ per variant: the CLAP header search path and the
+# feature define that gates the CLAP code paths (RendererFactory, etc.). Each
+# fragment carries its own full indentation + trailing newline, or is empty in
+# the Lite variant.
+clap_header_search = CLAP ?
+  "\t\t\t\t\t\t\"$(PROJECT_DIR)/third_party/clap-headers\",\n" : ""
+clap_prepro = CLAP ?
+  "\t\t\t\t\tGCC_PREPROCESSOR_DEFINITIONS = (\n\t\t\t\t\t\t\"FOO_TUN_MIDI_CLAP=1\",\n\t\t\t\t\t\t\"$(inherited)\",\n\t\t\t\t\t);\n" : ""
 
 # Collect resource files (XIB, etc.)
 resource_files = Dir.glob("Resources/*.xib").map { |f| File.basename(f) }
@@ -100,9 +128,18 @@ resource_files = Dir.glob("Resources/*.xib").map { |f| File.basename(f) }
 file_uuids = {}
 file_ref_uuids = {}
 
-[core_files, ui_files, integration_files].flatten.each do |file|
+[core_files, ui_files, integration_files, clap_files].flatten.each do |file|
   file_uuids[file] = generate_uuid
   file_ref_uuids[file] = generate_uuid
+end
+
+# The Clap PBXGroup definition (needs file_ref_uuids); empty in the Lite variant.
+clap_group_def = ""
+if CLAP
+  clap_group_def += "\t\t#{uuid_clap_group} /* Clap */ = {\n"
+  clap_group_def += "\t\t\tisa = PBXGroup;\n\t\t\tchildren = (\n"
+  clap_files.each { |f| clap_group_def += "\t\t\t\t#{file_ref_uuids[f]} /* #{f} */,\n" }
+  clap_group_def += "\t\t\t);\n\t\t\tpath = Clap;\n\t\t\tsourceTree = \"<group>\";\n\t\t};\n"
 end
 
 # Generate UUIDs for resource files
@@ -141,7 +178,7 @@ pbxproj_content = <<~PBXPROJ
 PBXPROJ
 
 # Add build file entries for source files
-[['Core', core_files], ['UI', ui_files], ['Integration', integration_files]].each do |group, files|
+src_groups.each do |group, files|
   files.each do |file|
     next if file.end_with?('.h')  # Don't compile headers
     pbxproj_content += "\t\t#{file_uuids[file]} /* #{file} in Sources */ = {isa = PBXBuildFile; fileRef = #{file_ref_uuids[file]} /* #{file} */; };\n"
@@ -175,7 +212,7 @@ pbxproj_content += <<~PBXPROJ
 PBXPROJ
 
 # Add file references for source files
-[['Core', core_files], ['UI', ui_files], ['Integration', integration_files]].each do |group, files|
+src_groups.each do |group, files|
   files.each do |file|
     file_type = if file.end_with?('.h')
       'sourcecode.c.h'
@@ -264,7 +301,7 @@ pbxproj_content += <<~PBXPROJ
 				#{uuid_core_group} /* Core */,
 				#{uuid_ui_group} /* UI */,
 				#{uuid_integration_group} /* Integration */,
-			);
+#{clap_src_child}			);
 			path = src;
 			sourceTree = "<group>";
 		};
@@ -310,7 +347,7 @@ pbxproj_content += <<~PBXPROJ
 			path = Integration;
 			sourceTree = "<group>";
 		};
-		#{uuid_resources_group} /* Resources */ = {
+#{clap_group_def}		#{uuid_resources_group} /* Resources */ = {
 			isa = PBXGroup;
 			children = (
 				#{uuid_infoplist} /* Info.plist */,
@@ -429,7 +466,7 @@ pbxproj_content += <<~PBXPROJ
 PBXPROJ
 
 # Add all source files (not headers) to sources build phase
-[['Core', core_files], ['UI', ui_files], ['Integration', integration_files]].each do |group, files|
+src_groups.each do |group, files|
   files.each do |file|
     next if file.end_with?('.h')
     pbxproj_content += "\t\t\t\t#{file_uuids[file]} /* #{file} in Sources */,\n"
@@ -545,13 +582,13 @@ pbxproj_content += <<~PBXPROJ
 				GCC_PREFIX_HEADER = src/Prefix.pch;
 				GCC_PRECOMPILE_PREFIX_HEADER = YES;
 				ARCHS = arm64;
-				OTHER_LDFLAGS = "-lfluidsynth";
+#{clap_prepro}				OTHER_LDFLAGS = "-lfluidsynth";
 				HEADER_SEARCH_PATHS = (
 					"#{SDK_SEARCH}",
 					"#{SDK_SEARCH}/foobar2000",
 					"#{SDK_SEARCH}/pfc",
 					"#{FLUIDSYNTH_PREFIX}/include",
-				);
+#{clap_header_search}				);
 				LIBRARY_SEARCH_PATHS = (
 					"#{SDK_SEARCH}/foobar2000/SDK/build/Release",
 					"#{SDK_SEARCH}/foobar2000/helpers/build/Release",
@@ -582,13 +619,13 @@ pbxproj_content += <<~PBXPROJ
 				GCC_PREFIX_HEADER = src/Prefix.pch;
 				GCC_PRECOMPILE_PREFIX_HEADER = YES;
 				ARCHS = arm64;
-				OTHER_LDFLAGS = "-lfluidsynth";
+#{clap_prepro}				OTHER_LDFLAGS = "-lfluidsynth";
 				HEADER_SEARCH_PATHS = (
 					"#{SDK_SEARCH}",
 					"#{SDK_SEARCH}/foobar2000",
 					"#{SDK_SEARCH}/pfc",
 					"#{FLUIDSYNTH_PREFIX}/include",
-				);
+#{clap_header_search}				);
 				LIBRARY_SEARCH_PATHS = (
 					"#{SDK_SEARCH}/foobar2000/SDK/build/Release",
 					"#{SDK_SEARCH}/foobar2000/helpers/build/Release",

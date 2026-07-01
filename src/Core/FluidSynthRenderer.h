@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "IMidiRenderer.h"
 #include "FluidEngine.h"
 
 #include <cstddef>
@@ -20,31 +21,33 @@
 
 namespace foo_midi {
 
-class FluidSynthRenderer {
+struct SMFInfo;
+
+class FluidSynthRenderer : public IMidiRenderer {
 public:
     FluidSynthRenderer() = default;
-    ~FluidSynthRenderer();
+    ~FluidSynthRenderer() override;
 
     FluidSynthRenderer(const FluidSynthRenderer&) = delete;
     FluidSynthRenderer& operator=(const FluidSynthRenderer&) = delete;
 
     // Acquire an engine for `key` (from the cache when possible) and start the
     // player on the in-memory MIDI. Returns false if the SoundFont can't load
-    // or the MIDI is rejected. `midiData` is copied internally. `nominalSeconds`
-    // is the parsed song length (0 if unknown), used to bound the release tail.
+    // or the MIDI is rejected. `midiData` is copied internally. `smf` supplies
+    // the parsed song length (to bound the release tail) and the tempo map
+    // (to convert seek positions in seconds to ticks); it must outlive this.
     bool init(const EngineKey& key, const uint8_t* midiData, size_t midiSize,
-              double nominalSeconds);
+              const SMFInfo& smf);
 
-    int sampleRate() const { return m_sampleRate; }
-    static constexpr int kChannels = 2;
+    int sampleRate() const override { return m_sampleRate; }
+    bool supportsSeek() const override { return true; }
 
     // Render up to `frames` stereo frames into `out` (must hold 2*frames floats).
     // Returns frames produced; 0 once the song and its (trimmed) tail are done.
-    int render(float* out, int frames);
+    int render(float* out, int frames) override;
 
-    // Seek to an absolute tick (SMFInfo::secondsToTick); `seconds` is the same
-    // position in seconds, used to keep the tail bookkeeping accurate.
-    void seek(uint32_t tick, double seconds);
+    // Seek to an absolute position in seconds (mapped to a tick via the tempo map).
+    void seek(double seconds) override;
 
 private:
     void teardown();
@@ -53,6 +56,7 @@ private:
 
     std::shared_ptr<FluidEngine> m_engine;  // borrowed from the cache
     fluid_player_t* m_player = nullptr;
+    const SMFInfo* m_smf = nullptr;         // for seek (tempo map); not owned
     int m_sampleRate = 44100;
 
     std::vector<uint8_t> m_midi;   // kept alive for the player's lifetime

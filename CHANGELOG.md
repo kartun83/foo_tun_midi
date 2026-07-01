@@ -4,6 +4,32 @@ All notable changes to foo_tun_midi will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.4.0] - 2026-07-01
+
+### Added
+
+- **CLAP instrument hosting (new "Full" build).** A second rendering backend
+  hosts a single CLAP instrument plugin and plays a MIDI file's notes through it
+  — for previewing a pattern into a synth or drum machine. Two components are
+  now built from one source tree: **`foo_tun_midi`** (FluidSynth only, unchanged)
+  and **`foo_tun_midi_clap`** (adds the CLAP engine). Install one or the other,
+  not both. The Full build's preferences add an **Engine** picker (FluidSynth /
+  CLAP) and a **plugin dropdown** auto-populated by scanning the installed CLAP
+  instruments (cached; a Rescan button re-walks after installing new plugins).
+  CLAP-backed files are non-seekable (the seekbar is disabled) and use the
+  plugin's own sound, so percussion/SoundFont settings don't apply to them.
+  Note: plugins that JIT-compile at runtime (the DSP56300 emulations —
+  NodalRed2x, OsTIrus, Osirus, Vavra) crash foobar2000, which lacks the macOS
+  JIT entitlement; non-JIT plugins (Tekno, Vital, u-he, …) work. See
+  docs/ARCHITECTURE.md.
+
+### Changed
+
+- **Rendering is now behind an `IMidiRenderer` interface**, with FluidSynth as
+  one implementation and CLAP as the other. No behavior change for FluidSynth
+  playback. `Scripts/build.sh` gained `--variant lite|full|both`, `--package`
+  (build a `.fb2k-component`), and now refuses `--install` with `--variant both`.
+
 ## [0.3.0] - 2026-07-01
 
 ### Added

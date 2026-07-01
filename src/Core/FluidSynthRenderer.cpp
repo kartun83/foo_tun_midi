@@ -4,6 +4,7 @@
 //
 
 #include "FluidSynthRenderer.h"
+#include "SMFInfo.h"
 #include "../fb2k_sdk.h"   // console::*
 #include <fluidsynth.h>
 
@@ -33,8 +34,10 @@ void FluidSynthRenderer::teardown() {
 
 bool FluidSynthRenderer::init(const EngineKey& key,
                               const uint8_t* midiData, size_t midiSize,
-                              double nominalSeconds) {
+                              const SMFInfo& smf) {
     teardown();
+    m_smf = &smf;
+    const double nominalSeconds = smf.durationSeconds;
     m_sampleRate = key.sampleRate > 0 ? key.sampleRate : 44100;
     m_finished = false;
 
@@ -120,9 +123,10 @@ void FluidSynthRenderer::warnIfSilent() {
     console::error(msg.c_str());
 }
 
-void FluidSynthRenderer::seek(uint32_t tick, double seconds) {
+void FluidSynthRenderer::seek(double seconds) {
     fluid_synth_t* syn = synth();
     if (!syn || !m_player) return;
+    uint32_t tick = m_smf ? m_smf->secondsToTick(seconds) : 0;
     fluid_player_seek(m_player, (int)tick);
     // Kill any notes left hanging across the jump.
     fluid_synth_all_sounds_off(syn, -1);
