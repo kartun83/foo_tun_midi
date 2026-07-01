@@ -30,6 +30,18 @@ struct SMFInfo {
     uint32_t totalTicks = 0;        // end tick of the longest track
     double durationSeconds = 0;
 
+    // Flattened channel-voice event stream (note on/off, CC, program, pitch,
+    // pressure), across all tracks, sorted ascending by absolute tick. Populated
+    // only when parseSMF(..., keepEvents=true) — the CLAP backend feeds these to
+    // a hosted instrument. Empty otherwise (FluidSynth parses the SMF itself).
+    struct ChannelEvent {
+        uint32_t tick;   // absolute tick
+        uint8_t status;  // full status byte incl. channel (0x80..0xEF)
+        uint8_t d1;      // data byte 1
+        uint8_t d2;      // data byte 2 (0 for 1-byte messages)
+    };
+    std::vector<ChannelEvent> events;
+
     // Tempo map, sorted ascending by tick. Always has an entry at tick 0.
     struct TempoEntry {
         uint32_t tick;
@@ -67,6 +79,8 @@ struct SMFInfo {
 };
 
 // Parse an in-memory SMF. On failure returns SMFInfo{ .valid = false }.
-SMFInfo parseSMF(const uint8_t* data, size_t size);
+// When keepEvents is true, the flattened channel-voice event stream is retained
+// in SMFInfo::events (for the CLAP backend); it is discarded otherwise.
+SMFInfo parseSMF(const uint8_t* data, size_t size, bool keepEvents = false);
 
 } // namespace foo_midi

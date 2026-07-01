@@ -8,14 +8,19 @@ metadata/seeking, and **rendering** it to PCM.
 
 | File | Responsibility |
 |------|----------------|
-| `src/Integration/MidiInput.cpp` | The `input` service. Slurps the file, parses it, drives the renderer, emits `audio_chunk`s. |
+| `src/Integration/MidiInput.cpp` | The `input` service. Slurps the file, parses it, drives a renderer *through the interface*, emits `audio_chunk`s. Backend-agnostic. |
 | `src/Integration/Main.cpp` | Component registration / about box. |
-| `src/Core/SMFInfo.{h,cpp}` | SMF parser → tempo map, duration, tick↔seconds. |
-| `src/Core/FluidSynthRenderer.{h,cpp}` | Per-track playback: hosts a `fluid_player` on a borrowed engine, pulls float blocks. |
+| `src/Core/SMFInfo.{h,cpp}` | SMF parser → tempo map, duration, tick↔seconds. Optionally retains the flattened channel-voice event stream (for the CLAP backend). |
+| `src/Core/IMidiRenderer.h` | The rendering interface: `sampleRate` / `supportsSeek` / `seek` / `render` (interleaved-stereo pull model). |
+| `src/Core/RendererFactory.{h,cpp}` | Builds the configured backend from preferences (FluidSynth always; CLAP under `FOO_TUN_MIDI_CLAP`). Keeps `MidiInput` backend-agnostic. |
+| `src/Core/FluidSynthRenderer.{h,cpp}` | `IMidiRenderer` #1: hosts a `fluid_player` on a borrowed engine, pulls float blocks. Seekable. |
 | `src/Core/FluidEngine.{h,cpp}` | Loaded synth+SoundFont keyed by (soundfont, samplerate, percussion) + a process-wide cache (load-once, reuse, async preload). |
-| `src/Core/MidiPreload.h` | Warms the engine cache from the current config (startup / on prefs change). |
-| `src/Core/MidiConfig.h` | `fb2k::configStore` wrapper (SoundFont path, percussion mode, sample rate). |
-| `src/UI/MidiPreferences.{h,mm}` | Cocoa preferences pane (Input → MIDI Player). |
+| `src/Clap/ClapRenderer.{h,cpp}` | `IMidiRenderer` #2 (Full build only): hosts a CLAP instrument plugin, feeds `SMFInfo`'s events at sample offsets, pulls its main output. Non-seekable. |
+| `src/Clap/ClapScanner.{h,cpp}` | Enumerates installed CLAP *instruments* (descriptor-only, cached/persisted) for the preferences dropdown. Full build only. |
+| `src/Core/MidiPreload.h` | Warms the FluidSynth engine cache from the current config (startup / on prefs change). |
+| `src/Core/MidiConfig.h` | `fb2k::configStore` wrapper (SoundFont path, percussion mode, sample rate, engine, CLAP plugin path). |
+| `src/UI/MidiPreferences.{h,mm}` | Cocoa preferences pane (Input → MIDI Player). The engine picker + CLAP path controls appear in the Full build only. |
+| `third_party/clap-headers/` | Vendored header-only CLAP SDK (MIT). Used by the Full build only. |
 | `src/version.h` | Version single-source-of-truth (parsed by the project generator). |
 | `src/branding.h` | About-box macro/attribution. |
 | `src/PreferencesCommon.h` | Vendored Cocoa prefs helpers (from the JendaT suite, MIT). |
@@ -27,7 +32,31 @@ metadata/seeking, and **rendering** it to PCM.
 pattern from the SDK's `input_impl.h` (modeled on `foo_sample/input_raw.cpp`),
 *not* the heavier `input_entry_v2`. One playable item per file, no subsongs.
 
-### Rendering model
+### Rendering backends (the `IMidiRenderer` interface)
+
+Rendering is split behind `IMidiRenderer` — a minimal pull interface
+(`sampleRate` / `supportsSeek` / `seek` / `render`, all interleaved stereo).
+`MidiInput` never names a concrete backend: `RendererFactory::createRenderer`
+reads the preferences and returns the right one, and `decode_can_seek` just
+reflects `supportsSeek()`. Concepts specific to one backend (percussion routing
+and the engine cache for FluidSynth; the plugin path for CLAP) stay inside that
+backend, not in the interface. Seeking is a declared *capability*, not a method
+every backend must meaningfully implement.
+
+Two backends implement it:
+
+- **`FluidSynthRenderer`** — always present. Seekable. Everything in the
+  "Rendering model", "SoundFont caching", and "Percussion routing" sections
+  below is FluidSynth-specific.
+- **`ClapRenderer`** — compiled into the **Full** build only
+  (`FOO_TUN_MIDI_CLAP`; see "Build variants"). Hosts a single CLAP instrument
+  plugin and feeds it the SMF's events for single-plugin pattern preview. It is
+  **non-seekable** (`supportsSeek()` returns false, so foobar2000 disables the
+  seekbar) and does **no** percussion routing — a hosted plugin owns its own
+  note→sound mapping, so there is no GM channel-10 ambiguity to resolve. See
+  "The CLAP backend" below.
+
+### Rendering model (FluidSynth)
 
 FluidSynth runs **without an audio driver**; the player is advanced purely by our
 `fluid_synth_write_float()` calls (offline pull rendering). `decode_run` asks for
@@ -143,6 +172,111 @@ channels used, program changes, and note numbers:
 python3 Scripts/midinfo.py path/to/file.mid
 ```
 
+## The CLAP backend (Full build)
+
+`ClapRenderer` (in `src/Clap/`) is the offline CLAP host proven by a standalone
+spike, adapted to the `IMidiRenderer` pull model. It hosts **one** CLAP
+instrument plugin for previewing a pattern — not a multi-timbral GM arrangement.
+
+- **Event feed.** CLAP has no `fluid_player` equivalent, so the renderer walks
+  the SMF's own events. `SMFInfo` gained opt-in capture: `parseSMF(data, size,
+  keepEvents=true)` retains the flattened channel-voice stream
+  (`SMFInfo::events`, stable-sorted by absolute tick). `MidiInput` requests this
+  only in the Full build. `ClapRenderer::init` maps each event's tick to an
+  output frame via the tempo map; `render()` emits the events landing in each
+  block at their sample offset.
+- **Note dialect.** The renderer queries the plugin's note port
+  (`supported_dialects`) and sends `clap_event_midi` unless the plugin supports
+  only the CLAP note dialect — both spike targets (Baby Audio Tekno, OsTIrus)
+  are MIDI-only, and since `SMFInfo` already yields raw MIDI, that is also the
+  simpler path. Channel merging is implicit "merge all" (every channel's events
+  go to the one plugin).
+- **Host contract (load-bearing).** The host allocates a real, zeroed buffer for
+  **every declared audio port, inputs included** — JUCE-wrapped CLAP plugins
+  build one unified `juce::AudioBuffer` over in+out buses and crash on a null
+  input channel (OsTIrus has a stereo input bus; passing none faulted in
+  `_platform_memset`). Output is captured from port 0. The host advertises no
+  extensions and runs single-threaded (offline).
+- **Tail.** Same trim as FluidSynth: past the parsed length (once all events are
+  sent) it stops after ~0.25 s of silence or a 4 s cap, preserving release/verb.
+
+- **Plugin discovery.** `ClapScanner` enumerates installed CLAP *instruments*
+  from the standard macOS locations (`~/Library/Audio/Plug-Ins/CLAP`,
+  `/Library/Audio/Plug-Ins/CLAP`, plus `CLAP_PATH`), recursing into vendor
+  subdirs. It reads each bundle's **descriptor only** (name / id / `features`) —
+  never instantiating — so scanning is cheap and can't boot or crash a
+  heavyweight plugin. Only descriptors carrying the `instrument` feature are
+  kept; the list is sorted, cached in memory, and persisted via `MidiConfig`
+  (`kKeyClapPluginList`) so the preferences dropdown is instant on later
+  launches. A "Rescan" button forces a re-walk.
+
+The engine picker and a **plugin dropdown** (populated from `ClapScanner`) live
+in preferences (Full build); the selection is stored via `MidiConfig`
+(`kKeyEngine`, and `kKeyClapPluginPath` + `kKeyClapPluginId` — a bundle can host
+several plugins, so both the path and the plugin id are recorded).
+
+### Limitation: JIT-compiling plugins crash the host
+
+foobar2000's app is codesigned with the hardened runtime and **does not carry
+`com.apple.security.cs.allow-jit`** (its only entitlements are
+`disable-library-validation`, `device.audio-input`, `get-task-allow`). A CLAP
+plugin that JIT-compiles at runtime therefore traps in
+`pthread_jit_write_protect_np` (EXC_BREAKPOINT) the moment it tries to make JIT
+memory executable — and, because that fault is on the plugin's own thread, it
+takes the whole foobar2000 process down. We cannot catch it from in-process, and
+a plugin's JIT use isn't visible in its descriptor, so `ClapScanner` cannot
+pre-filter these.
+
+Known affected: the **"The Usual Suspects" DSP56300 emulations** — `NodalRed2x`,
+`OsTIrus`, `Osirus`, `Vavra` (`com.theusualsuspects.*`), which JIT-emit a
+Motorola DSP core via asmjit. (Ironically `OsTIrus` was a spike target and
+worked *there* — the standalone spike binary runs without a hardened runtime.)
+Non-JIT plugins are unaffected: Baby Audio Tekno, Vital, the u-he set (Diva,
+Hive, Zebra3…), etc. play fine.
+
+Optional user-side workaround (not done by this project — it modifies the user's
+foobar2000 install and replaces its Apple signature with an ad-hoc one):
+
+```bash
+# quit foobar2000 first
+cat > /tmp/fb2k-jit.entitlements <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>com.apple.security.cs.allow-jit</key><true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+  <key>com.apple.security.cs.disable-library-validation</key><true/>
+  <key>com.apple.security.device.audio-input</key><true/>
+  <key>com.apple.security.get-task-allow</key><true/>
+</dict></plist>
+PLIST
+codesign --sign - --force --options runtime \
+  --entitlements /tmp/fb2k-jit.entitlements /Applications/foobar2000.app
+```
+
+Reversible by reinstalling foobar2000.
+
+## Build variants (Lite / Full)
+
+Two components are produced from one source tree, selected by the `VARIANT` env
+var in `Scripts/generate_xcode_project.rb` and driven by
+`Scripts/build.sh --variant lite|full|both`:
+
+| Variant | Product | Bundle id | CLAP |
+|---------|---------|-----------|------|
+| `lite` (default) | `foo_tun_midi` | `com.foobar2000.foo-tun-midi` | FluidSynth only |
+| `full` | `foo_tun_midi_clap` | `com.foobar2000.foo-tun-midi-clap` | + hosted CLAP instrument |
+
+The Full variant adds the `src/Clap` group to the build, defines
+`FOO_TUN_MIDI_CLAP=1`, and puts `third_party/clap-headers` on the header search
+path. The Lite variant **excludes** `src/Clap` from the build entirely (not
+merely `#ifdef`'d out) — its binary has no `ClapRenderer` symbols and does not
+link `dlopen`, so it structurally cannot host a plugin. The variants get distinct
+product names + bundle identifiers; both register an `input` for the same
+extensions, so a user installs **one or the other, not both** (`build.sh
+--install` refuses `--variant both` for this reason). `build.sh --package` zips
+each `.component` into a distributable `.fb2k-component`.
+
 ## Build / linking notes (SDK & toolchain gotchas)
 
 - **Standalone repo.** The foobar2000 SDK is third-party and not vendored;
@@ -173,5 +307,10 @@ python3 Scripts/midinfo.py path/to/file.mid
 - The reported (seekbar) length is the parsed song length; audible reverb/release
   can ring slightly past it. This is expected and now small — the renderer trims
   the trailing silence rather than appending a fixed tail.
-- Future ideas: optional VSTi/CLAP plugin hosting as an alternate renderer; more
-  metadata (lyrics/`.kar`); configurable reverb/chorus levels.
+- CLAP hosting exists as an alternate renderer in the **Full** build
+  (`ClapRenderer`), but is early: no plugin GUI/editor window yet (headless
+  offline render only), no preset/state load (the plugin's default patch is what
+  plays), and in-app playback hasn't been exercised across a wide range of
+  plugins. Non-seekable by design.
+- Future ideas: CLAP plugin GUI hosting + preset/state selection; VST3
+  hosting; more metadata (lyrics/`.kar`); configurable reverb/chorus levels.

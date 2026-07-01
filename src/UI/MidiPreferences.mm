@@ -11,6 +11,9 @@
 #include "../fb2k_sdk.h"
 #include "../Core/MidiConfig.h"
 #include "../Core/MidiPreload.h"
+#if FOO_TUN_MIDI_CLAP
+#include "../Clap/ClapScanner.h"
+#endif
 #import "../PreferencesCommon.h"
 
 // Flipped view for top-to-bottom layout (uniquely named per extension to avoid
@@ -26,6 +29,11 @@
     NSTextField *_statusLabel;
     NSPopUpButton *_percussionPopup;
     NSPopUpButton *_sampleRatePopup;
+#if FOO_TUN_MIDI_CLAP
+    NSPopUpButton *_enginePopup;
+    NSPopUpButton *_clapPluginPopup;
+    NSTextField *_clapStatusLabel;
+#endif
 }
 @end
 
@@ -41,7 +49,11 @@
 }
 
 - (void)loadView {
-    MidiFlippedView *view = [[MidiFlippedView alloc] initWithFrame:NSMakeRect(0, 0, 480, 380)];
+    CGFloat height = 380;
+#if FOO_TUN_MIDI_CLAP
+    height = 524;   // room for the Engine section
+#endif
+    MidiFlippedView *view = [[MidiFlippedView alloc] initWithFrame:NSMakeRect(0, 0, 480, height)];
     self.view = view;
     [self buildUI];
     [self loadSettings];
@@ -55,6 +67,64 @@
     title.frame = NSMakeRect(labelX, y, 440, 20);
     [self.view addSubview:title];
     y += 30;
+
+#if FOO_TUN_MIDI_CLAP
+    // Engine picker (CLAP-enabled build only): FluidSynth vs a hosted CLAP
+    // instrument. The SoundFont section below still configures FluidSynth.
+    NSTextField *engHeader = JLCreateSectionHeader(@"Engine");
+    engHeader.frame = NSMakeRect(labelX, y, 300, 17);
+    [self.view addSubview:engHeader];
+    y += 24;
+
+    NSTextField *engLabel = JLCreateHelperText(@"Renderer:");
+    engLabel.frame = NSMakeRect(labelX, y + 4, 100, 16);
+    [self.view addSubview:engLabel];
+
+    // Order matches midi_config::Engine (0 FluidSynth, 1 CLAP).
+    _enginePopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(labelX + 104, y, 220, 26)];
+    [_enginePopup addItemWithTitle:@"FluidSynth (SoundFont)"];
+    [_enginePopup addItemWithTitle:@"CLAP plugin"];
+    [_enginePopup setTarget:self];
+    [_enginePopup setAction:@selector(engineChanged:)];
+    [self.view addSubview:_enginePopup];
+    y += 30;
+
+    NSTextField *pluginLabel = JLCreateHelperText(@"Plugin:");
+    pluginLabel.frame = NSMakeRect(labelX, y + 4, 100, 16);
+    [self.view addSubview:pluginLabel];
+
+    // Populated by an on-demand scan of the installed CLAP instruments.
+    _clapPluginPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(labelX + 104, y, 236, 26)];
+    [_clapPluginPopup setTarget:self];
+    [_clapPluginPopup setAction:@selector(clapPluginChanged:)];
+    [self.view addSubview:_clapPluginPopup];
+
+    NSButton *rescan = [[NSButton alloc] initWithFrame:NSMakeRect(370, y - 1, 90, 26)];
+    rescan.bezelStyle = NSBezelStyleRounded;
+    rescan.title = @"Rescan";
+    [rescan setTarget:self];
+    [rescan setAction:@selector(rescanClapClicked:)];
+    [self.view addSubview:rescan];
+    y += 30;
+
+    _clapStatusLabel = JLCreateHelperText(@"");
+    _clapStatusLabel.frame = NSMakeRect(labelX, y, 440, 16);
+    [self.view addSubview:_clapStatusLabel];
+    y += 22;
+
+    NSTextField *engHint = JLCreateHelperText(
+        @"CLAP hosts a single instrument plugin to preview a pattern (no seeking; "
+        @"the plugin owns its own sound). The list is scanned from your installed "
+        @"CLAP plugins — use Rescan after installing new ones. FluidSynth uses the "
+        @"SoundFont below. Takes effect on the next track you play.");
+    engHint.frame = NSMakeRect(labelX, y, 450, 56);
+    engHint.maximumNumberOfLines = 4;
+    [engHint.cell setWraps:YES];
+    [self.view addSubview:engHint];
+    y += 62;
+
+    [self populateClapPopupRescan:NO];
+#endif
 
     NSTextField *header = JLCreateSectionHeader(@"SoundFont");
     header.frame = NSMakeRect(labelX, y, 300, 17);
@@ -157,6 +227,11 @@
     _pathField.stringValue = [NSString stringWithUTF8String:path.c_str()];
     [_percussionPopup selectItemAtIndex:midi_config::percussionMode()];
     [_sampleRatePopup selectItemWithTag:midi_config::sampleRate()];
+#if FOO_TUN_MIDI_CLAP
+    [_enginePopup selectItemAtIndex:midi_config::engine()];
+    // The plugin popup is populated in buildUI (populateClapPopupRescan:), which
+    // also selects the saved plugin and updates the status label.
+#endif
     [self updateStatus];
 }
 
@@ -204,6 +279,75 @@
     // Sample rate is part of the engine key, so re-warm the cache.
     foo_midi::preloadCurrentSoundFont();
 }
+
+#if FOO_TUN_MIDI_CLAP
+- (void)engineChanged:(id)sender {
+    midi_config::setConfigInt(midi_config::kKeyEngine,
+                              (int64_t)_enginePopup.indexOfSelectedItem);
+    // The CLAP backend builds per track; only FluidSynth benefits from a warm
+    // cache, and switching back to it re-uses whatever is already loaded.
+}
+
+// Rebuild the plugin dropdown from the scanned CLAP instruments. When `rescan`
+// is YES the filesystem is re-walked (and the cache re-persisted); otherwise the
+// cached list is used. The saved plugin is re-selected.
+- (void)populateClapPopupRescan:(BOOL)rescan {
+    const std::vector<foo_midi::ClapPluginEntry>& list =
+        foo_midi::clapInstruments(rescan ? true : false);
+
+    [_clapPluginPopup removeAllItems];
+    if (list.empty()) {
+        // addItem avoids NSPopUpButton's title de-duplication.
+        NSMenuItem *none = [[NSMenuItem alloc] initWithTitle:@"No CLAP instruments found"
+                                                      action:nil keyEquivalent:@""];
+        [[_clapPluginPopup menu] addItem:none];
+        _clapPluginPopup.enabled = NO;
+        [self updateClapStatusCount:0];
+        return;
+    }
+
+    _clapPluginPopup.enabled = YES;
+    std::string curPath = midi_config::clapPluginPath();
+    std::string curId = midi_config::clapPluginId();
+    NSInteger sel = 0;
+    for (size_t i = 0; i < list.size(); ++i) {
+        NSString *title = [NSString stringWithUTF8String:list[i].name.c_str()];
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title action:nil keyEquivalent:@""];
+        [[_clapPluginPopup menu] addItem:item];   // preserves order + duplicates
+        if (list[i].path == curPath && list[i].id == curId) sel = (NSInteger)i;
+    }
+    [_clapPluginPopup selectItemAtIndex:sel];
+    // Persist the selection when nothing was stored yet, so the first play uses
+    // the shown plugin rather than none.
+    if (curPath.empty()) [self saveClapSelection:sel];
+    [self updateClapStatusCount:(NSInteger)list.size()];
+}
+
+- (void)saveClapSelection:(NSInteger)idx {
+    const std::vector<foo_midi::ClapPluginEntry>& list = foo_midi::clapInstruments(false);
+    if (idx < 0 || (size_t)idx >= list.size()) return;
+    midi_config::setConfigString(midi_config::kKeyClapPluginPath, list[idx].path.c_str());
+    midi_config::setConfigString(midi_config::kKeyClapPluginId, list[idx].id.c_str());
+}
+
+- (void)clapPluginChanged:(id)sender {
+    [self saveClapSelection:_clapPluginPopup.indexOfSelectedItem];
+}
+
+- (void)rescanClapClicked:(id)sender {
+    [self populateClapPopupRescan:YES];
+}
+
+- (void)updateClapStatusCount:(NSInteger)n {
+    if (n <= 0) {
+        _clapStatusLabel.stringValue = @"No CLAP instruments found in the standard folders.";
+        _clapStatusLabel.textColor = [NSColor systemOrangeColor];
+    } else {
+        _clapStatusLabel.stringValue = [NSString stringWithFormat:@"%ld CLAP instrument(s) found.", (long)n];
+        _clapStatusLabel.textColor = [NSColor secondaryLabelColor];
+    }
+}
+#endif
 
 - (void)browseClicked:(id)sender {
     NSOpenPanel *panel = [NSOpenPanel openPanel];
