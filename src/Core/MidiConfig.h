@@ -1,0 +1,86 @@
+//
+//  MidiConfig.h
+//  foo_jl_midi_mac
+//
+//  Persistent configuration via fb2k::configStore. On macOS v2, cfg_var does
+//  NOT persist reliably — configStore is the supported API (see the wave_seekbar
+//  component's notes). Shared between the decoder (MidiInput.cpp) and the
+//  preferences pane (MidiPreferences.mm).
+//
+
+#pragma once
+
+#include "../fb2k_sdk.h"
+#include <string>
+
+namespace midi_config {
+
+static const char* const kConfigPrefix = "foo_jl_midi.";
+
+// Config keys.
+static const char* const kKeySoundFontPath = "soundfont_path";
+static const char* const kKeyForcePercussion = "force_percussion";
+
+// Fallback used when the user hasn't chosen a SoundFont yet. Full General MIDI
+// bank (incl. the drum kit on channel 10), lives on the external drive.
+static const char* const kDefaultSoundFont =
+    "/Volumes/external_wd/Download/midi/sf2/MuseScore_General.sf3";
+
+inline std::string getConfigString(const char* key, const char* defaultVal) {
+    try {
+        auto store = fb2k::configStore::get();
+        pfc::string8 fullKey;
+        fullKey << kConfigPrefix << key;
+        fb2k::stringRef val = store->getConfigString(fullKey.c_str(), defaultVal);
+        return val->c_str();
+    } catch (...) {
+        return defaultVal ? defaultVal : "";
+    }
+}
+
+inline void setConfigString(const char* key, const char* value) {
+    try {
+        auto store = fb2k::configStore::get();
+        pfc::string8 fullKey;
+        fullKey << kConfigPrefix << key;
+        store->setConfigString(fullKey.c_str(), value);
+    } catch (...) {
+        // best effort; nothing actionable if config store is unavailable
+    }
+}
+
+inline int64_t getConfigInt(const char* key, int64_t defaultVal) {
+    try {
+        auto store = fb2k::configStore::get();
+        pfc::string8 fullKey;
+        fullKey << kConfigPrefix << key;
+        return store->getConfigInt(fullKey.c_str(), defaultVal);
+    } catch (...) {
+        return defaultVal;
+    }
+}
+
+inline void setConfigInt(const char* key, int64_t value) {
+    try {
+        auto store = fb2k::configStore::get();
+        pfc::string8 fullKey;
+        fullKey << kConfigPrefix << key;
+        store->setConfigInt(fullKey.c_str(), value);
+    } catch (...) {
+        // best effort
+    }
+}
+
+inline bool forcePercussion() {
+    return getConfigInt(kKeyForcePercussion, 0) != 0;
+}
+
+// Resolved SoundFont path the decoder should load: the user's choice, or the
+// bundled default if unset/empty.
+inline std::string soundFontPath() {
+    std::string p = getConfigString(kKeySoundFontPath, kDefaultSoundFont);
+    if (p.empty()) p = kDefaultSoundFont;
+    return p;
+}
+
+} // namespace midi_config
