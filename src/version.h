@@ -8,5 +8,5 @@
 
 #pragma once
 
-#define MIDI_VERSION "0.1.0"
-#define MIDI_VERSION_INT 010
+#define MIDI_VERSION "0.2.0"
+#define MIDI_VERSION_INT 020

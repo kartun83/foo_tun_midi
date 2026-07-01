@@ -15,6 +15,9 @@ a phrase or groove before importing selections into a DAW.
 - [FluidSynth](https://www.fluidsynth.org/) — `brew install fluid-synth`
 - A SoundFont (`.sf2` / `.sf3`). A solid general-purpose choice is
   [MuseScore_General](https://ftp.osuosl.org/pub/musescore/soundfont/MuseScore_General/).
+  The SoundFont is loaded once and reused (and preloaded at startup), so start-up
+  latency is a non-issue after the first load — but note an uncompressed `.sf2`
+  loads in ~20 ms versus several seconds for a compressed `.sf3`.
 - To build from source: Xcode Command Line Tools, Ruby, and
   [`sevenzip`](https://formulae.brew.sh/formula/sevenzip) (`brew install sevenzip`,
   for unpacking the SDK).

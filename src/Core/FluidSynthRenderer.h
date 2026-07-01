@@ -1,23 +1,22 @@
 //
 //  FluidSynthRenderer.h
-//  foo_jl_midi_mac
+//  foo_tun_midi
 //
-//  Thin wrapper around FluidSynth for offline block rendering of an in-memory
-//  SMF through a SoundFont. Pull model: create, then repeatedly render()
-//  interleaved-stereo float blocks until it returns 0 (end of stream + tail).
+//  Per-track playback over a (usually cached) FluidEngine. Owns only the
+//  fluid_player and the in-memory MIDI; the synth + loaded SoundFont are
+//  borrowed from FluidEngineCache so repeated track starts don't reload the
+//  SoundFont. Pull model: create, then repeatedly render() interleaved-stereo
+//  float blocks until it returns 0 (end of stream + tail).
 //
 
 #pragma once
 
-#include <cstdint>
-#include <cstddef>
-#include <vector>
+#include "FluidEngine.h"
 
-// Match FluidSynth's own tags (see fluidsynth/types.h) so these forward
-// declarations don't conflict with the real header.
-typedef struct _fluid_hashtable_t fluid_settings_t;
-typedef struct _fluid_synth_t fluid_synth_t;
-typedef struct _fluid_player_t fluid_player_t;
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <vector>
 
 namespace foo_midi {
 
@@ -29,16 +28,10 @@ public:
     FluidSynthRenderer(const FluidSynthRenderer&) = delete;
     FluidSynthRenderer& operator=(const FluidSynthRenderer&) = delete;
 
-    // Load soundfont + MIDI and start the player. Returns false on any failure
-    // (missing/invalid soundfont, bad MIDI). `midiData` is copied internally.
-    //
-    // forcePercussion: route ALL 16 channels to the drum bank. Drum-pattern
-    // libraries often put GM-drum-map notes on channel 1 with no program change
-    // (they expect a DAW drum rack), so they'd otherwise render as piano.
-    bool init(const char* soundfontPath,
-              const uint8_t* midiData, size_t midiSize,
-              int sampleRate,
-              bool forcePercussion = false);
+    // Acquire an engine for `key` (from the cache when possible) and start the
+    // player on the in-memory MIDI. Returns false if the SoundFont can't load
+    // or the MIDI is rejected. `midiData` is copied internally.
+    bool init(const EngineKey& key, const uint8_t* midiData, size_t midiSize);
 
     int sampleRate() const { return m_sampleRate; }
     static constexpr int kChannels = 2;
@@ -52,11 +45,10 @@ public:
 
 private:
     void teardown();
+    fluid_synth_t* synth() const;
 
-    fluid_settings_t* m_settings = nullptr;
-    fluid_synth_t* m_synth = nullptr;
+    std::shared_ptr<FluidEngine> m_engine;  // borrowed from the cache
     fluid_player_t* m_player = nullptr;
-    int m_sfontId = -1;
     int m_sampleRate = 44100;
 
     std::vector<uint8_t> m_midi;   // kept alive for the player's lifetime

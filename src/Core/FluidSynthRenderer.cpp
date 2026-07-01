@@ -1,6 +1,6 @@
 //
 //  FluidSynthRenderer.cpp
-//  foo_jl_midi_mac
+//  foo_tun_midi
 //
 
 #include "FluidSynthRenderer.h"
@@ -12,47 +12,32 @@ FluidSynthRenderer::~FluidSynthRenderer() {
     teardown();
 }
 
-void FluidSynthRenderer::teardown() {
-    // Player must be deleted before the synth.
-    if (m_player) { delete_fluid_player(m_player); m_player = nullptr; }
-    if (m_synth)  { delete_fluid_synth(m_synth);   m_synth = nullptr; }
-    if (m_settings) { delete_fluid_settings(m_settings); m_settings = nullptr; }
-    m_sfontId = -1;
+fluid_synth_t* FluidSynthRenderer::synth() const {
+    return m_engine ? m_engine->synth() : nullptr;
 }
 
-bool FluidSynthRenderer::init(const char* soundfontPath,
-                              const uint8_t* midiData, size_t midiSize,
-                              int sampleRate, bool forcePercussion) {
+void FluidSynthRenderer::teardown() {
+    // Delete our player first, then hand the engine back to the cache so its
+    // synth (with the SoundFont still loaded) can be reused by the next track.
+    if (m_player) { delete_fluid_player(m_player); m_player = nullptr; }
+    if (m_engine) {
+        FluidEngineCache::instance().release(m_engine);
+        m_engine.reset();
+    }
+    m_finished = false;
+}
+
+bool FluidSynthRenderer::init(const EngineKey& key,
+                              const uint8_t* midiData, size_t midiSize) {
     teardown();
-    m_sampleRate = sampleRate > 0 ? sampleRate : 44100;
+    m_sampleRate = key.sampleRate > 0 ? key.sampleRate : 44100;
     m_finished = false;
 
-    m_settings = new_fluid_settings();
-    if (!m_settings) return false;
-    fluid_settings_setnum(m_settings, "synth.sample-rate", (double)m_sampleRate);
-    fluid_settings_setint(m_settings, "synth.midi-channels", 16);
-    // No separate audio driver/timer: the player is advanced by our
-    // fluid_synth_write_* calls (offline pull rendering).
-
-    m_synth = new_fluid_synth(m_settings);
-    if (!m_synth) { teardown(); return false; }
-
-    m_sfontId = fluid_synth_sfload(m_synth, soundfontPath, 1 /* reset presets */);
-    if (m_sfontId == FLUID_FAILED) { teardown(); return false; }
-
-    if (forcePercussion) {
-        // Pin every channel to the percussion bank (128) and load the standard
-        // kit, then mark the channel as a drum channel so any program changes
-        // the file might send stay within the drum bank.
-        for (int ch = 0; ch < 16; ++ch) {
-            fluid_synth_set_channel_type(m_synth, ch, CHANNEL_TYPE_DRUM);
-            fluid_synth_bank_select(m_synth, ch, 128);
-            fluid_synth_program_change(m_synth, ch, 0);
-        }
-    }
+    m_engine = FluidEngineCache::instance().acquire(key);
+    if (!m_engine) return false;   // SoundFont failed to load
 
     m_midi.assign(midiData, midiData + midiSize);
-    m_player = new_fluid_player(m_synth);
+    m_player = new_fluid_player(m_engine->synth());
     if (!m_player) { teardown(); return false; }
     if (fluid_player_add_mem(m_player, m_midi.data(), m_midi.size()) != FLUID_OK) {
         teardown();
@@ -66,10 +51,11 @@ bool FluidSynthRenderer::init(const char* soundfontPath,
 }
 
 int FluidSynthRenderer::render(float* out, int frames) {
-    if (m_finished || !m_synth || !m_player || frames <= 0) return 0;
+    fluid_synth_t* syn = synth();
+    if (m_finished || !syn || !m_player || frames <= 0) return 0;
 
     // Interleaved stereo: left at offset 0 stride 2, right at offset 1 stride 2.
-    if (fluid_synth_write_float(m_synth, frames,
+    if (fluid_synth_write_float(syn, frames,
                                 out, 0, kChannels,
                                 out, 1, kChannels) != FLUID_OK) {
         m_finished = true;
@@ -78,7 +64,7 @@ int FluidSynthRenderer::render(float* out, int frames) {
 
     if (fluid_player_get_status(m_player) == FLUID_PLAYER_DONE) {
         // Player has consumed all events; render the tail until voices die out.
-        if (fluid_synth_get_active_voice_count(m_synth) == 0) {
+        if (fluid_synth_get_active_voice_count(syn) == 0) {
             m_finished = true;
         } else {
             m_tailFramesRemaining -= frames;
@@ -89,10 +75,11 @@ int FluidSynthRenderer::render(float* out, int frames) {
 }
 
 void FluidSynthRenderer::seek(uint32_t tick) {
-    if (!m_synth || !m_player) return;
+    fluid_synth_t* syn = synth();
+    if (!syn || !m_player) return;
     fluid_player_seek(m_player, (int)tick);
     // Kill any notes left hanging across the jump.
-    fluid_synth_all_sounds_off(m_synth, -1);
+    fluid_synth_all_sounds_off(syn, -1);
     m_finished = false;
     m_tailFramesRemaining = m_sampleRate * 2;
 }

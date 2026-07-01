@@ -1,0 +1,158 @@
+//
+//  FluidEngine.cpp
+//  foo_tun_midi
+//
+
+#include "FluidEngine.h"
+#include <fluidsynth.h>
+
+namespace foo_midi {
+
+// ---------------------------------------------------------------- FluidEngine
+
+std::shared_ptr<FluidEngine> FluidEngine::create(const EngineKey& key) {
+    // Not std::make_shared: the constructor is private.
+    std::shared_ptr<FluidEngine> eng(new FluidEngine());
+    if (!eng->load(key)) return nullptr;
+    return eng;
+}
+
+bool FluidEngine::load(const EngineKey& key) {
+    m_key = key;
+
+    m_settings = new_fluid_settings();
+    if (!m_settings) return false;
+    fluid_settings_setnum(m_settings, "synth.sample-rate", (double)key.sampleRate);
+    fluid_settings_setint(m_settings, "synth.midi-channels", 16);
+
+    m_synth = new_fluid_synth(m_settings);
+    if (!m_synth) return false;
+
+    m_sfontId = fluid_synth_sfload(m_synth, key.soundfont.c_str(), 1 /* reset presets */);
+    if (m_sfontId == FLUID_FAILED) return false;
+
+    resetForNewTrack();
+    return true;
+}
+
+void FluidEngine::resetForNewTrack() {
+    if (!m_synth) return;
+
+    // Reset all channels/controllers/programs and silence ringing voices so a
+    // reused synth doesn't carry state (program changes, held notes, reverb
+    // tail) from the previous track.
+    fluid_synth_system_reset(m_synth);
+
+    if (m_key.forcePercussion) {
+        // Pin every channel to the percussion bank (128) and load the standard
+        // kit, then mark it a drum channel so later program changes stay in 128.
+        for (int ch = 0; ch < 16; ++ch) {
+            fluid_synth_set_channel_type(m_synth, ch, CHANNEL_TYPE_DRUM);
+            fluid_synth_bank_select(m_synth, ch, 128);
+            fluid_synth_program_change(m_synth, ch, 0);
+        }
+    }
+}
+
+FluidEngine::~FluidEngine() {
+    if (m_synth)    { delete_fluid_synth(m_synth);       m_synth = nullptr; }
+    if (m_settings) { delete_fluid_settings(m_settings); m_settings = nullptr; }
+}
+
+// ----------------------------------------------------------- FluidEngineCache
+
+FluidEngineCache& FluidEngineCache::instance() {
+    static FluidEngineCache s_instance;
+    return s_instance;
+}
+
+std::shared_ptr<FluidEngine> FluidEngineCache::acquire(const EngineKey& key) {
+    std::unique_lock<std::mutex> lk(m_mtx);
+
+    for (;;) {
+        if (m_status == Status::Ready && m_key == key && !m_inUse) {
+            m_inUse = true;
+            auto eng = m_engine;
+            lk.unlock();
+            eng->resetForNewTrack();
+            return eng;
+        }
+        if (m_status == Status::Loading && m_key == key) {
+            m_cv.wait(lk);           // a preload for this key is in flight
+            continue;
+        }
+        break;                       // nothing usable cached: build our own
+    }
+
+    if (!m_inUse) {
+        // Cache slot is free: build this key and install it as the cached engine.
+        m_key = key;
+        m_status = Status::Loading;
+        m_engine = nullptr;
+        lk.unlock();
+
+        auto eng = FluidEngine::create(key);
+
+        lk.lock();
+        if (eng && m_key == key) {
+            m_engine = eng;
+            m_status = Status::Ready;
+            m_inUse = true;
+            m_cv.notify_all();
+            lk.unlock();
+            eng->resetForNewTrack();
+            return eng;
+        }
+        // Build failed, or the desired key changed while we loaded.
+        if (m_key == key) { m_status = Status::Empty; m_engine = nullptr; }
+        m_cv.notify_all();
+        lk.unlock();
+        return eng;                  // valid (temporary) or nullptr on failure
+    }
+
+    // Cache is busy with a different in-use engine (e.g. gapless overlap):
+    // build a temporary engine that won't be cached.
+    lk.unlock();
+    return FluidEngine::create(key);
+}
+
+void FluidEngineCache::release(const std::shared_ptr<FluidEngine>& engine) {
+    std::lock_guard<std::mutex> lk(m_mtx);
+    if (engine && engine == m_engine) {
+        m_inUse = false;
+        m_cv.notify_all();
+    }
+    // Temporary engines are freed when the caller drops its shared_ptr.
+}
+
+void FluidEngineCache::preload(const EngineKey& key) {
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        if (m_key == key && (m_status == Status::Ready || m_status == Status::Loading))
+            return;                  // already loaded or loading
+        if (m_inUse)
+            return;                  // slot lent out; will load on next acquire
+        m_key = key;
+        m_status = Status::Loading;
+        m_engine = nullptr;
+    }
+
+    std::thread([this, key]() {
+        auto eng = FluidEngine::create(key);
+        std::lock_guard<std::mutex> lk(m_mtx);
+        if (m_key == key && m_status == Status::Loading) {
+            m_engine = eng;
+            m_status = eng ? Status::Ready : Status::Empty;
+            m_cv.notify_all();
+        }
+    }).detach();
+}
+
+void FluidEngineCache::clear() {
+    std::lock_guard<std::mutex> lk(m_mtx);
+    if (m_inUse) return;             // don't yank an engine out from under a track
+    m_engine = nullptr;
+    m_status = Status::Empty;
+}
+
+} // namespace foo_midi

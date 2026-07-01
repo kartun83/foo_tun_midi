@@ -10,6 +10,7 @@
 #import "MidiPreferences.h"
 #include "../fb2k_sdk.h"
 #include "../Core/MidiConfig.h"
+#include "../Core/MidiPreload.h"
 #import "../PreferencesCommon.h"
 
 // Flipped view for top-to-bottom layout (uniquely named per extension to avoid
@@ -144,6 +145,8 @@
     midi_config::setConfigString(midi_config::kKeySoundFontPath,
                                  _pathField.stringValue.UTF8String);
     [self updateStatus];
+    // Warm the cache for the new SoundFont so the next play is instant.
+    foo_midi::preloadCurrentSoundFont();
 }
 
 - (void)pathFieldChanged:(id)sender {
@@ -153,6 +156,8 @@
 - (void)forcePercussionChanged:(id)sender {
     midi_config::setConfigInt(midi_config::kKeyForcePercussion,
         _forcePercussionCheckbox.state == NSControlStateValueOn ? 1 : 0);
+    // Percussion mode is part of the engine key, so re-warm the cache.
+    foo_midi::preloadCurrentSoundFont();
 }
 
 - (void)browseClicked:(id)sender {

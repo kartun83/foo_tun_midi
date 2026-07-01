@@ -11,7 +11,9 @@ metadata/seeking, and **rendering** it to PCM.
 | `src/Integration/MidiInput.cpp` | The `input` service. Slurps the file, parses it, drives the renderer, emits `audio_chunk`s. |
 | `src/Integration/Main.cpp` | Component registration / about box. |
 | `src/Core/SMFInfo.{h,cpp}` | SMF parser → tempo map, duration, tick↔seconds. |
-| `src/Core/FluidSynthRenderer.{h,cpp}` | FluidSynth wrapper: load SoundFont + MIDI, pull float blocks. |
+| `src/Core/FluidSynthRenderer.{h,cpp}` | Per-track playback: hosts a `fluid_player` on a borrowed engine, pulls float blocks. |
+| `src/Core/FluidEngine.{h,cpp}` | Loaded synth+SoundFont keyed by (soundfont, samplerate, percussion) + a process-wide cache (load-once, reuse, async preload). |
+| `src/Core/MidiPreload.h` | Warms the engine cache from the current config (startup / on prefs change). |
 | `src/Core/MidiConfig.h` | `fb2k::configStore` wrapper (SoundFont path, percussion flag). |
 | `src/UI/MidiPreferences.{h,mm}` | Cocoa preferences pane (Input → MIDI Player). |
 | `src/version.h` | Version single-source-of-truth (parsed by the project generator). |
@@ -37,6 +39,29 @@ reverb/long releases aren't cut off.
 Seeking maps seconds → tick via the tempo map (`SMFInfo::secondsToTick`), calls
 `fluid_player_seek`, then `fluid_synth_all_sounds_off` to kill notes hanging
 across the jump.
+
+### SoundFont caching (startup latency)
+
+Loading a SoundFont dominates start-up cost: a compressed `.sf3` (OGG samples)
+takes ~4 s to load because FluidSynth decompresses every sample; an uncompressed
+`.sf2` of similar size loads in ~20 ms. So the synth is **not** rebuilt per
+track. `FluidEngineCache` keeps one live `FluidEngine` keyed by
+(soundfont, samplerate, percussion):
+
+- `acquire(key)` returns the cached engine when it matches and is idle (waiting
+  on an in-flight preload of the same key), else builds one. If the slot is busy
+  with a *different* in-use engine — foobar can briefly open two decoders during
+  a gapless transition — it returns an uncached temporary, since a FluidSynth
+  synth can't host two players at once.
+- `release()` marks the cached engine idle again; between tracks the synth is
+  `fluid_synth_system_reset`'d and drum routing re-applied, so no state leaks.
+- `preload(key)` builds the engine on a background thread. `MidiPreload.h` calls
+  it at component startup (`initquit::on_init`) and whenever the SoundFont or
+  percussion preference changes, so the first play is instant too (once the
+  preload finishes). Missing files (unmounted volume) are skipped.
+
+Net effect: first play after a SoundFont change pays the load once; every later
+track start is ~0 ms.
 
 ## Percussion routing (important)
 

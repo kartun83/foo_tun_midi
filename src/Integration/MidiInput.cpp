@@ -66,15 +66,18 @@ public:
     t_filestats get_file_stats(abort_callback& a) { return m_file->get_stats(a); }
 
     void decode_initialize(unsigned /*p_flags*/, abort_callback& /*p_abort*/) {
-        std::string soundfont = midi_config::soundFontPath();
-        bool forceDrums = midi_config::forcePercussion();
+        EngineKey key;
+        key.soundfont = midi_config::soundFontPath();
+        key.sampleRate = 44100;
+        key.forcePercussion = midi_config::forcePercussion();
+
         m_renderer = std::make_unique<FluidSynthRenderer>();
-        if (!m_renderer->init(soundfont.c_str(), m_data.data(), m_data.size(), 44100, forceDrums)) {
+        if (!m_renderer->init(key, m_data.data(), m_data.size())) {
             m_renderer.reset();
-            std::string msg = "foo_midi: failed to initialize FluidSynth. Check that the "
+            std::string msg = "foo_tun_midi: failed to initialize FluidSynth. Check that the "
                               "SoundFont exists and is a valid .sf2/.sf3 (set it in "
                               "Preferences > Input > MIDI Player): ";
-            msg += soundfont;
+            msg += key.soundfont;
             console::error(msg.c_str());
             throw exception_io_data();
         }
