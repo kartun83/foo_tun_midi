@@ -9,7 +9,7 @@
 #pragma once
 
 #define TUN_AUTHOR "Alexey Tveritinov"
-#define TUN_GITHUB_URL "https://github.com/atveritinov/foo_tun_midi"  // TODO: update when the repo is published
+#define TUN_GITHUB_URL "https://github.com/kartun83/foo_tun_midi"
 #define TUN_COPYRIGHT_YEAR "2026"
 
 //
