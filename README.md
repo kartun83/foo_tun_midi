@@ -57,17 +57,22 @@ The SDK and `build/` are git-ignored; only source, scripts, and docs are tracked
 | Setting | Purpose |
 |---------|---------|
 | **SoundFont** | Path to the `.sf2` / `.sf3` used for rendering. Falls back to a built-in default if unset. |
-| **Force all channels to the drum kit** | Route every MIDI channel to the percussion bank. |
+| **Force drum kit** | Percussion handling: **Off** (General MIDI), **Auto** (default), or **Always**. |
+| **Sample rate** | Rate FluidSynth renders at (44100 / 48000 / 88200 / 96000 Hz). Default 44100; foobar2000 resamples to your output device, so match your device rate to skip an extra resample. |
 
-### Why "force percussion"?
+### Why "force drum kit"?
 
 Many drum-pattern libraries store GM-drum-map notes (36 = kick, 38 = snare,
 42/44/46 = hi-hats) on **channel 1 with no program change** — they expect you to
 drop the file onto a drum instrument in a DAW. Under General MIDI, only channel
 10 is percussion, so those files otherwise render as *piano* (channel 1's
-default patch). This is correct GM behaviour, not a bug. Enable **Force all
-channels to the drum kit** to audition such files as drums; leave it off for
-normal multi-instrument MIDI.
+default patch). This is correct GM behaviour, not a bug.
+
+- **Auto** (default) forces the drum kit only for files that look like this
+  (notes on a melodic channel, no program change, in the GM drum range), so a
+  mixed library just works.
+- **Always** forces every file to the drum kit.
+- **Off** honours General MIDI (drums only on channel 10).
 
 To see what a file actually contains:
 

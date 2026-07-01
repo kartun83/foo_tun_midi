@@ -19,8 +19,10 @@ namespace foo_midi {
 inline EngineKey currentEngineKey() {
     EngineKey key;
     key.soundfont = midi_config::soundFontPath();
-    key.sampleRate = 44100;
-    key.forcePercussion = midi_config::forcePercussion();
+    key.sampleRate = midi_config::sampleRate();
+    // The Auto decision is per-file, which the preload can't know; warm the
+    // non-forced engine unless the user has chosen Always.
+    key.forcePercussion = midi_config::percussionMode() == midi_config::kPercAlways;
     return key;
 }
 

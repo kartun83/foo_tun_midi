@@ -30,18 +30,21 @@ public:
 
     // Acquire an engine for `key` (from the cache when possible) and start the
     // player on the in-memory MIDI. Returns false if the SoundFont can't load
-    // or the MIDI is rejected. `midiData` is copied internally.
-    bool init(const EngineKey& key, const uint8_t* midiData, size_t midiSize);
+    // or the MIDI is rejected. `midiData` is copied internally. `nominalSeconds`
+    // is the parsed song length (0 if unknown), used to bound the release tail.
+    bool init(const EngineKey& key, const uint8_t* midiData, size_t midiSize,
+              double nominalSeconds);
 
     int sampleRate() const { return m_sampleRate; }
     static constexpr int kChannels = 2;
 
     // Render up to `frames` stereo frames into `out` (must hold 2*frames floats).
-    // Returns frames produced; 0 once the song and its release tail are done.
+    // Returns frames produced; 0 once the song and its (trimmed) tail are done.
     int render(float* out, int frames);
 
-    // Seek to an absolute tick (from SMFInfo::secondsToTick).
-    void seek(uint32_t tick);
+    // Seek to an absolute tick (SMFInfo::secondsToTick); `seconds` is the same
+    // position in seconds, used to keep the tail bookkeeping accurate.
+    void seek(uint32_t tick, double seconds);
 
 private:
     void teardown();
@@ -54,7 +57,14 @@ private:
 
     std::vector<uint8_t> m_midi;   // kept alive for the player's lifetime
     bool m_finished = false;
-    int m_tailFramesRemaining = 0; // release/reverb tail after player reports done
+
+    // Tail handling. Past the nominal song end (or once the player reports done)
+    // we keep rendering only while audio is still ringing, then stop after a
+    // short run of silence — FluidSynth's player reports DONE ~2 s late, so
+    // waiting for it would append seconds of dead air to every track.
+    long long m_renderedFrames = 0;
+    long long m_nominalFrames = 0; // parsed song length in frames (0 = unknown)
+    int m_silenceRun = 0;          // consecutive silent frames past the end
 
     // Silence detection: if a whole track renders inaudibly we log a hint once,
     // to explain SoundFonts that "produce no sound" (e.g. a missing program).

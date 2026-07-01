@@ -4,6 +4,40 @@ All notable changes to foo_tun_midi will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.3.0] - 2026-07-01
+
+### Added
+
+- **Auto-detect drum files.** Percussion handling is now a three-way choice —
+  **Off** (General MIDI), **Auto**, or **Always** — replacing the on/off toggle.
+  Auto forces the drum kit only for files that look like drum patterns misrouted
+  off channel 10 (notes on a melodic channel, no program change, in the GM drum
+  range), so a mixed library plays correctly without touching the setting. An
+  existing "force on" setting migrates to Always; new installs default to Auto.
+- **Metadata as tags.** The SMF's sequence name (as title), tempo (BPM), time
+  signature, key signature, instrument names, and copyright are parsed and
+  exposed as track fields. Text is normalised to valid UTF-8 (old Latin-1 files
+  included).
+- **Configurable sample rate.** The render rate (44100 / 48000 / 88200 /
+  96000 Hz) is now a preference instead of being hardcoded to 44100. foobar2000
+  still resamples to the output device, so matching your device rate avoids an
+  extra resample.
+
+### Fixed
+
+- **Trailing silence trimmed.** FluidSynth's player reports end-of-song up to
+  ~2 s late, and the renderer used to wait for that and then add a fixed 2 s
+  tail — appending up to ~4 s of dead air to every track. Playback now ends once
+  the sound has actually decayed (past the parsed song length), so the rendered
+  length matches the reported length far more closely while still preserving
+  reverb/release tails.
+
+### Notes
+
+- Seeking was reviewed and confirmed correct: FluidSynth 2.x replays program,
+  bank and controller state on seek (skipping only note-ons), so instruments are
+  right after a jump. No change needed.
+
 ## [0.2.1] - 2026-07-01
 
 ### Fixed

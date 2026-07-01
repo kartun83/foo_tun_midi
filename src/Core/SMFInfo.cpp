@@ -5,6 +5,7 @@
 
 #include "SMFInfo.h"
 #include <algorithm>
+#include <string>
 
 namespace foo_midi {
 
@@ -41,9 +42,57 @@ struct Reader {
         if (!has(n)) { ok = false; p = end; return; }
         p += n;
     }
+    // Read n bytes as a text string (for name/copyright metas), trimming a
+    // trailing NUL and any control padding.
+    std::string str(size_t n) {
+        std::vector<uint8_t> raw;
+        raw.reserve(n);
+        for (size_t i = 0; i < n; i++) {
+            uint8_t c = u8();
+            if (c == 0) continue;              // some exports pad with NUL
+            if (c == '\r' || c == '\n') c = ' ';
+            raw.push_back(c);
+        }
+        // Emit valid UTF-8 for foobar's tag API: pass through well-formed UTF-8,
+        // otherwise treat stray high bytes as Latin-1 (common in old MIDI files).
+        std::string s;
+        for (size_t i = 0; i < raw.size();) {
+            uint8_t c = raw[i];
+            int extra = c < 0x80 ? 0 : c < 0xE0 ? 1 : c < 0xF0 ? 2 : c < 0xF8 ? 3 : -1;
+            bool valid = extra >= 0 && i + extra < raw.size();
+            for (int k = 1; valid && k <= extra; k++)
+                if ((raw[i + k] & 0xC0) != 0x80) valid = false;
+            if (extra == 0) { s.push_back((char)c); i++; }
+            else if (valid) { for (int k = 0; k <= extra; k++) s.push_back((char)raw[i + k]); i += extra + 1; }
+            else { // Latin-1 byte -> 2-byte UTF-8
+                s.push_back((char)(0xC0 | (c >> 6)));
+                s.push_back((char)(0x80 | (c & 0x3F)));
+                i++;
+            }
+        }
+        // trim surrounding spaces
+        size_t a = s.find_first_not_of(' ');
+        size_t b = s.find_last_not_of(' ');
+        return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
+    }
 };
 
 struct RawTempo { uint32_t tick; uint32_t us; };
+
+std::string renderKeySignature(int8_t sf, uint8_t mi) {
+    // sf: -7..+7 (flats/sharps), mi: 0 major, 1 minor.
+    static const char* major[15] = {
+        "Cb", "Gb", "Db", "Ab", "Eb", "Bb", "F",
+        "C", "G", "D", "A", "E", "B", "F#", "C#" };
+    static const char* minor[15] = {
+        "Ab", "Eb", "Bb", "F", "C", "G", "D",
+        "A", "E", "B", "F#", "C#", "G#", "D#", "A#" };
+    int idx = sf + 7;
+    if (idx < 0 || idx > 14) return std::string();
+    std::string s = mi ? minor[idx] : major[idx];
+    s += mi ? " minor" : " major";
+    return s;
+}
 
 } // namespace
 
@@ -131,9 +180,31 @@ SMFInfo parseSMF(const uint8_t* data, size_t size) {
             if (status == 0xFF) {           // meta event
                 uint8_t type = tr.u8();
                 uint32_t mlen = tr.vlq();
-                if (type == 0x51 && mlen == 3) { // set tempo
+                if (type == 0x51 && mlen == 3) {          // set tempo
                     uint32_t us = tr.be(3);
                     tempos.push_back({ tick, us ? us : 500000 });
+                } else if (type == 0x58 && mlen >= 2) {   // time signature
+                    uint8_t nn = tr.u8();
+                    uint8_t dd = tr.u8();
+                    tr.skip(mlen - 2);
+                    if (out.timeSigNum == 0) { out.timeSigNum = nn; out.timeSigDen = 1 << dd; }
+                } else if (type == 0x59 && mlen >= 2) {   // key signature
+                    int8_t sf = (int8_t)tr.u8();
+                    uint8_t mi = tr.u8();
+                    tr.skip(mlen - 2);
+                    if (out.keySignature.empty()) out.keySignature = renderKeySignature(sf, mi);
+                } else if (type == 0x03) {                // sequence/track name
+                    std::string s = tr.str(mlen);
+                    if (out.sequenceName.empty() && !s.empty()) out.sequenceName = s;
+                } else if (type == 0x04) {                // instrument name
+                    std::string s = tr.str(mlen);
+                    if (!s.empty() &&
+                        std::find(out.instrumentNames.begin(), out.instrumentNames.end(), s)
+                            == out.instrumentNames.end())
+                        out.instrumentNames.push_back(s);
+                } else if (type == 0x02) {                // copyright
+                    std::string s = tr.str(mlen);
+                    if (out.copyright.empty() && !s.empty()) out.copyright = s;
                 } else {
                     tr.skip(mlen);
                 }
@@ -144,8 +215,21 @@ SMFInfo parseSMF(const uint8_t* data, size_t size) {
                 // Channel voice/mode message: 2 data bytes except program
                 // change (0xC) and channel pressure (0xD) which have 1.
                 uint8_t hi = status & 0xF0;
-                if (hi == 0xC0 || hi == 0xD0) tr.u8();
-                else { tr.u8(); tr.u8(); }
+                uint8_t ch = status & 0x0F;
+                if (hi == 0xC0) {              // program change
+                    tr.u8();
+                    out.hasProgramChange = true;
+                } else if (hi == 0xD0) {       // channel pressure
+                    tr.u8();
+                } else {
+                    uint8_t d1 = tr.u8();
+                    uint8_t d2 = tr.u8();
+                    if (hi == 0x90 && d2 > 0) {  // note-on (velocity > 0)
+                        out.noteCount++;
+                        if (ch == 9) out.usesDrumChannel = true;
+                        else if (d1 >= 35 && d1 <= 81) out.drumRangeNoteCount++;
+                    }
+                }
             }
         }
         maxTick = std::max(maxTick, tick);
@@ -171,6 +255,10 @@ SMFInfo parseSMF(const uint8_t* data, size_t size) {
     }
 
     out.durationSeconds = out.tickToSeconds(out.totalTicks);
+
+    if (!out.tempoMap.empty() && out.tempoMap[0].usPerQuarter > 0)
+        out.initialBpm = 60e6 / (double)out.tempoMap[0].usPerQuarter;
+
     out.valid = true;
     return out;
 }

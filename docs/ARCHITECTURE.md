@@ -14,7 +14,7 @@ metadata/seeking, and **rendering** it to PCM.
 | `src/Core/FluidSynthRenderer.{h,cpp}` | Per-track playback: hosts a `fluid_player` on a borrowed engine, pulls float blocks. |
 | `src/Core/FluidEngine.{h,cpp}` | Loaded synth+SoundFont keyed by (soundfont, samplerate, percussion) + a process-wide cache (load-once, reuse, async preload). |
 | `src/Core/MidiPreload.h` | Warms the engine cache from the current config (startup / on prefs change). |
-| `src/Core/MidiConfig.h` | `fb2k::configStore` wrapper (SoundFont path, percussion flag). |
+| `src/Core/MidiConfig.h` | `fb2k::configStore` wrapper (SoundFont path, percussion mode, sample rate). |
 | `src/UI/MidiPreferences.{h,mm}` | Cocoa preferences pane (Input → MIDI Player). |
 | `src/version.h` | Version single-source-of-truth (parsed by the project generator). |
 | `src/branding.h` | About-box macro/attribution. |
@@ -32,13 +32,36 @@ pattern from the SDK's `input_impl.h` (modeled on `foo_sample/input_raw.cpp`),
 FluidSynth runs **without an audio driver**; the player is advanced purely by our
 `fluid_synth_write_float()` calls (offline pull rendering). `decode_run` asks for
 `kBlockFrames` (4096) interleaved-stereo frames each call and hands them to
-`audio_chunk::set_data_32`. After the player reports `FLUID_PLAYER_DONE` we keep
-rendering until the active voice count hits zero or a ~2 s tail cap elapses, so
-reverb/long releases aren't cut off.
+`audio_chunk::set_data_32` at the configured render rate. That rate
+(`midi_config::sampleRate()`, default 44100; also 48000/88200/96000) is baked
+into the `EngineKey`, so FluidSynth renders natively at it and the decoder
+declares it via `get_info` — foobar2000's output chain resamples to the device
+if they differ. There's no per-input "device rate" callback in this SDK; a
+decoder simply declares whatever rate it produces and the pipeline adapts.
+
+**End-of-song / tail.** FluidSynth's player reports `FLUID_PLAYER_DONE` up to ~2 s
+*after* the last event (measured), so waiting for it and then adding a fixed tail
+appended several seconds of dead air to every track. Instead, once we pass the
+parsed song length (`SMFInfo::durationSeconds`, converted to frames and handed to
+the renderer) *or* the player reports done, we keep rendering only while sound is
+still present and stop after ~0.25 s of continuous silence (peak `< 1e-4`), when
+the active voice count reaches zero, or at a 4 s hard cap. This trims trailing
+silence while preserving reverb/release decay. The parsed length itself is
+accurate — it matches FluidSynth's own `fluid_player_get_total_ticks`.
 
 Seeking maps seconds → tick via the tempo map (`SMFInfo::secondsToTick`), calls
 `fluid_player_seek`, then `fluid_synth_all_sounds_off` to kill notes hanging
-across the jump.
+across the jump. FluidSynth 2.x replays program/bank/controller events up to the
+seek point (skipping note-ons), so instrument state is correct after a jump — no
+manual reconstruction needed.
+
+### Metadata
+
+`SMFInfo` also collects, in the same single pass, the sequence name (→ `title`),
+initial tempo (BPM), time signature, key signature, instrument names, and
+copyright, surfaced through `get_info`. Meta text is normalised to valid UTF-8
+(well-formed UTF-8 passes through; stray high bytes are treated as Latin-1) so
+foobar's tag API accepts old files.
 
 ### SoundFont caching (startup latency)
 
@@ -88,8 +111,19 @@ be 0: many drum SoundFonts place their only kit at another program number (e.g. 
 TR-909 kit at program 24), which would otherwise select a non-existent preset and
 render silence. Program 0 is used when present, else the lowest bank-128 program
 (`-1`/no-op when the SoundFont has no percussion at all). `set_channel_type(DRUM)`
-makes any later program change the file sends stay within bank 128. Exposed as the
-"Force all channels to the drum kit" preference.
+makes any later program change the file sends stay within bank 128.
+
+**When to force** is a three-way preference (`midi_config::PercussionMode`):
+*Off* / *Auto* / *Always*. The decision is made per file in `decode_initialize`
+and baked into the `EngineKey` (so forced and non-forced share of the same
+SoundFont are distinct cache entries). *Auto* consults
+`SMFInfo::looksLikePercussionMisrouted()` — true when the file has notes but none
+on channel 10, no program change anywhere, and ≥80 % of notes fall in the GM drum
+range (35–81). That catches DAW drum-rack exports (drums on channel 1) while
+leaving real General MIDI and files that already use channel 10 alone. General
+MIDI / GS / XG bank-select and SysEx resets are handled by FluidSynth's player
+during normal playback, so no separate SysEx parser is needed; *Auto* covers the
+one case FluidSynth can't infer (drums on the wrong channel).
 
 ### Diagnostics
 
@@ -136,9 +170,8 @@ python3 Scripts/midinfo.py path/to/file.mid
 
 ## Known issues / future work
 
-- Reported length (from the tempo map) can be shorter than the audible render
-  because of the release tail; the seekbar length may not exactly match playback
-  length. Worth reconciling player end-of-track vs. our `totalTicks`.
-- Phase 2 ideas: auto-detect "looks like a drum file" (single channel, all-
-  percussion note range) to route only that file; optional CLAP plugin hosting as
-  an alternate renderer.
+- The reported (seekbar) length is the parsed song length; audible reverb/release
+  can ring slightly past it. This is expected and now small — the renderer trims
+  the trailing silence rather than appending a fixed tail.
+- Future ideas: optional VSTi/CLAP plugin hosting as an alternate renderer; more
+  metadata (lyrics/`.kar`); configurable reverb/chorus levels.

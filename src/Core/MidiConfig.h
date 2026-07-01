@@ -19,7 +19,16 @@ static const char* const kConfigPrefix = "foo_jl_midi.";
 
 // Config keys.
 static const char* const kKeySoundFontPath = "soundfont_path";
-static const char* const kKeyForcePercussion = "force_percussion";
+static const char* const kKeyForcePercussion = "force_percussion";   // legacy bool
+static const char* const kKeyPercussionMode = "percussion_mode";     // 0/1/2 below
+static const char* const kKeySampleRate = "sample_rate";             // render Hz
+
+// Percussion handling mode.
+enum PercussionMode {
+    kPercOff = 0,     // never force: honour General MIDI (drums only on channel 10)
+    kPercAuto = 1,    // force only when a file looks like misrouted drums
+    kPercAlways = 2,  // always force every channel to the drum kit
+};
 
 // Fallback used when the user hasn't chosen a SoundFont yet. Full General MIDI
 // bank (incl. the drum kit on channel 10), lives on the external drive.
@@ -71,8 +80,28 @@ inline void setConfigInt(const char* key, int64_t value) {
     }
 }
 
-inline bool forcePercussion() {
-    return getConfigInt(kKeyForcePercussion, 0) != 0;
+// Percussion mode, migrating the legacy boolean: an existing "force on" user
+// maps to Always, everyone else defaults to Auto.
+inline int percussionMode() {
+    int64_t m = getConfigInt(kKeyPercussionMode, -1);
+    if (m < 0) return getConfigInt(kKeyForcePercussion, 0) != 0 ? kPercAlways : kPercAuto;
+    if (m < kPercOff || m > kPercAlways) return kPercAuto;
+    return (int)m;
+}
+
+// Render sample rate (Hz). FluidSynth renders at this rate and the decoder
+// declares it to foobar; the output chain resamples to the device if needed.
+// Defaults to 44100; only a handful of standard rates are offered/accepted.
+static const int kDefaultSampleRate = 44100;
+
+inline int sampleRate() {
+    int64_t sr = getConfigInt(kKeySampleRate, kDefaultSampleRate);
+    switch (sr) {
+        case 44100: case 48000: case 88200: case 96000:
+            return (int)sr;
+        default:
+            return kDefaultSampleRate;
+    }
 }
 
 // Resolved SoundFont path the decoder should load: the user's choice, or the

@@ -24,7 +24,8 @@
 @interface MidiPreferences () {
     NSTextField *_pathField;
     NSTextField *_statusLabel;
-    NSButton *_forcePercussionCheckbox;
+    NSPopUpButton *_percussionPopup;
+    NSPopUpButton *_sampleRatePopup;
 }
 @end
 
@@ -40,7 +41,7 @@
 }
 
 - (void)loadView {
-    MidiFlippedView *view = [[MidiFlippedView alloc] initWithFrame:NSMakeRect(0, 0, 480, 280)];
+    MidiFlippedView *view = [[MidiFlippedView alloc] initWithFrame:NSMakeRect(0, 0, 480, 380)];
     self.view = view;
     [self buildUI];
     [self loadSettings];
@@ -95,30 +96,67 @@
     [self.view addSubview:drumHeader];
     y += 24;
 
-    _forcePercussionCheckbox = [[NSButton alloc] initWithFrame:NSMakeRect(labelX, y, 440, 20)];
-    _forcePercussionCheckbox.buttonType = NSButtonTypeSwitch;
-    _forcePercussionCheckbox.title = @"Force all channels to the drum kit";
-    [_forcePercussionCheckbox setTarget:self];
-    [_forcePercussionCheckbox setAction:@selector(forcePercussionChanged:)];
-    [self.view addSubview:_forcePercussionCheckbox];
-    y += 24;
+    NSTextField *drumLabel = JLCreateHelperText(@"Force drum kit:");
+    drumLabel.frame = NSMakeRect(labelX, y + 4, 100, 16);
+    [self.view addSubview:drumLabel];
+
+    // Order matches midi_config::PercussionMode (0 Off, 1 Auto, 2 Always).
+    _percussionPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(labelX + 104, y, 220, 26)];
+    [_percussionPopup addItemWithTitle:@"Off (General MIDI)"];
+    [_percussionPopup addItemWithTitle:@"Auto-detect drum files"];
+    [_percussionPopup addItemWithTitle:@"Always force"];
+    [_percussionPopup setTarget:self];
+    [_percussionPopup setAction:@selector(percussionModeChanged:)];
+    [self.view addSubview:_percussionPopup];
+    y += 30;
 
     NSTextField *drumHint = JLCreateHelperText(
         @"Many drum-pattern libraries put GM-drum notes on channel 1 with no "
-        @"program change (they expect a DAW drum rack), so they'd otherwise "
-        @"play as piano. Enable this to audition them as drums.");
-    drumHint.frame = NSMakeRect(labelX + 18, y, 440, 48);
-    drumHint.maximumNumberOfLines = 4;
+        @"program change (they expect a DAW drum rack), so they'd otherwise play "
+        @"as piano. Auto forces the drum kit only for files that look like that; "
+        @"Always forces every file; Off honours General MIDI (drums on channel 10).");
+    drumHint.frame = NSMakeRect(labelX, y, 450, 60);
+    drumHint.maximumNumberOfLines = 5;
     [drumHint.cell setWraps:YES];
     [self.view addSubview:drumHint];
+    y += 66;
+
+    NSTextField *outHeader = JLCreateSectionHeader(@"Output");
+    outHeader.frame = NSMakeRect(labelX, y, 300, 17);
+    [self.view addSubview:outHeader];
+    y += 24;
+
+    NSTextField *srLabel = JLCreateHelperText(@"Sample rate:");
+    srLabel.frame = NSMakeRect(labelX, y + 4, 100, 16);
+    [self.view addSubview:srLabel];
+
+    // Item tags carry the actual rate in Hz (see midi_config::sampleRate()).
+    _sampleRatePopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(labelX + 104, y, 160, 26)];
+    const int kRates[] = { 44100, 48000, 88200, 96000 };
+    for (int r : kRates) {
+        [_sampleRatePopup addItemWithTitle:[NSString stringWithFormat:@"%d Hz", r]];
+        [[_sampleRatePopup lastItem] setTag:r];
+    }
+    [_sampleRatePopup setTarget:self];
+    [_sampleRatePopup setAction:@selector(sampleRateChanged:)];
+    [self.view addSubview:_sampleRatePopup];
+    y += 30;
+
+    NSTextField *srHint = JLCreateHelperText(
+        @"Rate FluidSynth renders at. foobar2000 resamples to your output device, "
+        @"so 44100 is fine; match your device rate to avoid an extra resample.");
+    srHint.frame = NSMakeRect(labelX, y, 450, 40);
+    srHint.maximumNumberOfLines = 3;
+    [srHint.cell setWraps:YES];
+    [self.view addSubview:srHint];
 }
 
 - (void)loadSettings {
     std::string path = midi_config::getConfigString(
         midi_config::kKeySoundFontPath, midi_config::kDefaultSoundFont);
     _pathField.stringValue = [NSString stringWithUTF8String:path.c_str()];
-    _forcePercussionCheckbox.state =
-        midi_config::forcePercussion() ? NSControlStateValueOn : NSControlStateValueOff;
+    [_percussionPopup selectItemAtIndex:midi_config::percussionMode()];
+    [_sampleRatePopup selectItemWithTag:midi_config::sampleRate()];
     [self updateStatus];
 }
 
@@ -153,10 +191,17 @@
     [self save];
 }
 
-- (void)forcePercussionChanged:(id)sender {
-    midi_config::setConfigInt(midi_config::kKeyForcePercussion,
-        _forcePercussionCheckbox.state == NSControlStateValueOn ? 1 : 0);
+- (void)percussionModeChanged:(id)sender {
+    midi_config::setConfigInt(midi_config::kKeyPercussionMode,
+                              (int64_t)_percussionPopup.indexOfSelectedItem);
     // Percussion mode is part of the engine key, so re-warm the cache.
+    foo_midi::preloadCurrentSoundFont();
+}
+
+- (void)sampleRateChanged:(id)sender {
+    midi_config::setConfigInt(midi_config::kKeySampleRate,
+                              (int64_t)_sampleRatePopup.selectedItem.tag);
+    // Sample rate is part of the engine key, so re-warm the cache.
     foo_midi::preloadCurrentSoundFont();
 }
 

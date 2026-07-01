@@ -52,14 +52,40 @@ public:
         if (m_smf.valid && m_smf.durationSeconds > 0) {
             p_info.set_length(m_smf.durationSeconds);
         }
-        p_info.info_set_int("samplerate", 44100);
+        p_info.info_set_int("samplerate", midi_config::sampleRate());
         p_info.info_set_int("channels", FluidSynthRenderer::kChannels);
         p_info.info_set("encoding", "synthesized");
         p_info.info_set("codec", "MIDI");
-        if (m_smf.valid) {
-            p_info.info_set_int("midi_format", m_smf.format);
-            p_info.info_set_int("midi_tracks", m_smf.numTracks);
+        if (!m_smf.valid) return;
+
+        p_info.info_set_int("midi_format", m_smf.format);
+        p_info.info_set_int("midi_tracks", m_smf.numTracks);
+
+        // Musical metadata parsed from the SMF.
+        if (m_smf.initialBpm > 0)
+            p_info.info_set_int("midi_tempo", (t_int64)(m_smf.initialBpm + 0.5));
+        if (m_smf.timeSigNum > 0) {
+            pfc::string_formatter ts;
+            ts << m_smf.timeSigNum << "/" << m_smf.timeSigDen;
+            p_info.info_set("midi_time_signature", ts);
         }
+        if (!m_smf.keySignature.empty())
+            p_info.info_set("midi_key", m_smf.keySignature.c_str());
+        if (!m_smf.instrumentNames.empty()) {
+            pfc::string_formatter instr;
+            for (const auto& n : m_smf.instrumentNames) {
+                if (!instr.is_empty()) instr << ", ";
+                instr << n.c_str();
+            }
+            p_info.info_set("midi_instruments", instr);
+        }
+
+        // Tag-style fields (shown as track metadata). Only set when present so we
+        // don't blank out foobar's filename-derived title.
+        if (!m_smf.sequenceName.empty())
+            p_info.meta_set("title", m_smf.sequenceName.c_str());
+        if (!m_smf.copyright.empty())
+            p_info.meta_set("copyright", m_smf.copyright.c_str());
     }
 
     t_filestats2 get_stats2(unsigned f, abort_callback& a) { return m_file->get_stats2_(f, a); }
@@ -68,11 +94,16 @@ public:
     void decode_initialize(unsigned /*p_flags*/, abort_callback& /*p_abort*/) {
         EngineKey key;
         key.soundfont = midi_config::soundFontPath();
-        key.sampleRate = 44100;
-        key.forcePercussion = midi_config::forcePercussion();
+        key.sampleRate = midi_config::sampleRate();
+
+        // Effective percussion decision: Always forces every file; Auto forces
+        // only files that look like drum patterns misrouted off channel 10.
+        int mode = midi_config::percussionMode();
+        key.forcePercussion = (mode == midi_config::kPercAlways) ||
+            (mode == midi_config::kPercAuto && m_smf.looksLikePercussionMisrouted());
 
         m_renderer = std::make_unique<FluidSynthRenderer>();
-        if (!m_renderer->init(key, m_data.data(), m_data.size())) {
+        if (!m_renderer->init(key, m_data.data(), m_data.size(), m_smf.durationSeconds)) {
             m_renderer.reset();
             std::string msg = "foo_tun_midi: failed to initialize FluidSynth. Check that the "
                               "SoundFont exists and is a valid .sf2/.sf3 (set it in "
@@ -95,7 +126,7 @@ public:
 
     void decode_seek(double p_seconds, abort_callback& /*p_abort*/) {
         if (!m_renderer) return;
-        m_renderer->seek(m_smf.secondsToTick(p_seconds));
+        m_renderer->seek(m_smf.secondsToTick(p_seconds), p_seconds);
     }
 
     bool decode_can_seek() { return m_smf.valid; }
