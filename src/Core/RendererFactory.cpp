@@ -60,6 +60,9 @@ std::unique_ptr<IMidiRenderer> createRenderer(const uint8_t* midiData,
                            "Falling back to FluidSynth.");
         } else {
             auto r = std::make_unique<ClapRenderer>();
+            midi_config::ClapPresetRef preset = midi_config::clapPreset();
+            if (preset.valid)
+                r->setPreset(preset.locationKind, preset.location, preset.loadKey);
             if (r->init(plugin, midi_config::clapPluginId(),
                         midi_config::sampleRate(), smf)) return r;
             std::string msg = "foo_tun_midi: failed to load CLAP plugin, falling "

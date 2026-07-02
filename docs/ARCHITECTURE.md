@@ -210,6 +210,34 @@ instrument plugin for previewing a pattern — not a multi-timbral GM arrangemen
   (`kKeyClapPluginList`) so the preferences dropdown is instant on later
   launches. A "Rescan" button forces a re-walk.
 
+  **Scanner memory cost (known).** A scan `dlopen`s every `.clap` to read its
+  features, and macOS **never unloads** an image containing Objective-C/JUCE on
+  `dlclose` — so each scanned bundle stays resident for the rest of the session.
+  Measured: a full walk of ~48 installed plugins grows RSS ~1 MB → ~200 MB and
+  never releases it. A scan therefore permanently raises foobar2000's footprint,
+  and repeated Rescans compound it (this can OOM a machine already under
+  pressure). Mitigations in place: the list is cached/persisted so a scan runs
+  only on first use or an explicit Rescan (playback never scans), and the scan
+  `dlopen`s with `RTLD_LAZY` (descriptor read only). The real fix — running the
+  scan in a short-lived child process so the OS reclaims the memory on exit (and
+  gains crash-isolation for the JIT plugins below) — is noted under future work.
+
+- **Preset switching (headless).** A CLAP instrument can expose its presets to
+  the host without showing its GUI, via two extensions: the entry-level
+  `preset-discovery` factory (enumerate presets — `ClapPresets::discoverClapPresets`
+  drives it with an indexer + metadata-receiver, reading metadata only, no
+  `create_plugin`) and the per-instance `preset-load` extension
+  (`from_location(kind, location, load_key)`, applied in `ClapRenderer::init`
+  after the plugin is instantiated and before `activate`). The prefs pane's
+  **Preset** dropdown is filled on demand by the "Presets" button (discovery
+  `dlopen`s the one selected plugin, so it's user-initiated, not automatic).
+  Support is uneven: plugins that ship no discovery provider (e.g. Vital,
+  OsTIrus) fall back silently to their default patch; plugins that do (e.g. Baby
+  Audio Tekno, ~80 `.baby` presets) are switchable. For FILE-kind presets the
+  `location` is the preset file path and `load_key` is empty; the selection is
+  persisted as `kKeyClapPreset` (`"kind\tlocation\tload_key"`) + a display name
+  in `kKeyClapPresetName`.
+
 The engine picker and a **plugin dropdown** (populated from `ClapScanner`) live
 in preferences (Full build); the selection is stored via `MidiConfig`
 (`kKeyEngine`, and `kKeyClapPluginPath` + `kKeyClapPluginId` — a bundle can host
@@ -309,8 +337,14 @@ each `.component` into a distributable `.fb2k-component`.
   the trailing silence rather than appending a fixed tail.
 - CLAP hosting exists as an alternate renderer in the **Full** build
   (`ClapRenderer`), but is early: no plugin GUI/editor window yet (headless
-  offline render only), no preset/state load (the plugin's default patch is what
-  plays), and in-app playback hasn't been exercised across a wide range of
-  plugins. Non-seekable by design.
-- Future ideas: CLAP plugin GUI hosting + preset/state selection; VST3
-  hosting; more metadata (lyrics/`.kar`); configurable reverb/chorus levels.
+  offline render only), and in-app playback hasn't been exercised across a wide
+  range of plugins. Headless **preset switching** works for plugins that ship a
+  preset-discovery provider (see "Preset switching" above); others play their
+  default patch. Non-seekable by design.
+- **Scanner is memory-heavy** (see "Scanner memory cost"): a scan permanently
+  raises RSS because macOS won't unload Obj-C/JUCE images. Mitigated (cache-only,
+  `RTLD_LAZY`) but not fixed. The proper fix is out-of-process scanning (fork+exec
+  a helper that scans and exits) — also buys crash-isolation for the JIT plugins.
+- Future ideas: out-of-process plugin scanning; CLAP plugin GUI hosting; full
+  `clap.state` (non-preset) load; VST3 hosting; more metadata (lyrics/`.kar`);
+  configurable reverb/chorus levels.

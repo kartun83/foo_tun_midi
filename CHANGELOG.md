@@ -4,6 +4,30 @@ All notable changes to foo_tun_midi will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.5.0] - 2026-07-02
+
+### Added
+
+- **Headless CLAP preset switching (Full build).** A hosted CLAP instrument's
+  presets can now be selected without opening the plugin's GUI, via the CLAP
+  `preset-discovery` + `preset-load` extensions. Preferences gained a **Preset**
+  dropdown next to the plugin picker; a **Presets** button loads the selected
+  plugin's preset list on demand. Works for plugins that ship a preset-discovery
+  provider (e.g. Baby Audio Tekno); plugins without one (e.g. Vital) silently
+  keep their default patch. The choice is applied when the plugin is
+  instantiated and persists across launches.
+
+### Fixed / Changed
+
+- **Reduced the CLAP plugin scanner's memory cost.** Diagnosed a
+  macOS out-of-memory: because macOS never unloads an Obj-C/JUCE plugin image on
+  `dlclose`, each scan of the installed plugins permanently raised foobar2000's
+  memory (~200 MB for a large plugin folder), and repeated Rescans compounded it.
+  The scanner now `dlopen`s with `RTLD_LAZY` (descriptor read only) and the
+  preferences hint warns that Rescan/Presets raise memory until restart. Playback
+  never scans. A full fix (out-of-process scanning) is tracked in
+  docs/ARCHITECTURE.md.
+
 ## [0.4.0] - 2026-07-01
 
 ### Added
