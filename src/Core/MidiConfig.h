@@ -11,6 +11,7 @@
 #pragma once
 
 #include "../fb2k_sdk.h"
+#include <cstdlib>
 #include <string>
 
 namespace midi_config {
@@ -26,6 +27,8 @@ static const char* const kKeyEngine = "engine";                      // 0/1 belo
 static const char* const kKeyClapPluginPath = "clap_plugin_path";    // .clap bundle
 static const char* const kKeyClapPluginId = "clap_plugin_id";        // plugin within it
 static const char* const kKeyClapPluginList = "clap_plugin_list";    // cached scan
+static const char* const kKeyClapPreset = "clap_preset";             // "kind\tloc\tkey"
+static const char* const kKeyClapPresetName = "clap_preset_name";    // display label
 
 // Rendering backend. Only the CLAP-enabled ("Full") build exposes a choice;
 // the FluidSynth-only build ignores this and always renders with FluidSynth.
@@ -139,6 +142,30 @@ inline std::string clapPluginPath() {
 // Empty selects the first plugin in the bundle.
 inline std::string clapPluginId() {
     return getConfigString(kKeyClapPluginId, "");
+}
+
+// A CLAP preset the hosted plugin should load on init (headless preset switch).
+// Persisted as "kind\tlocation\tloadKey"; `valid` is false when unset.
+struct ClapPresetRef {
+    bool valid = false;
+    uint32_t locationKind = 0;   // clap_preset_discovery_location_kind
+    std::string location;        // file path (FILE kind) or empty
+    std::string loadKey;         // container key; may be empty
+};
+
+inline ClapPresetRef clapPreset() {
+    ClapPresetRef ref;
+    std::string s = getConfigString(kKeyClapPreset, "");
+    if (s.empty()) return ref;
+    size_t t1 = s.find('\t');
+    if (t1 == std::string::npos) return ref;
+    size_t t2 = s.find('\t', t1 + 1);
+    if (t2 == std::string::npos) return ref;
+    ref.locationKind = (uint32_t)strtoul(s.substr(0, t1).c_str(), nullptr, 10);
+    ref.location = s.substr(t1 + 1, t2 - t1 - 1);
+    ref.loadKey = s.substr(t2 + 1);
+    ref.valid = true;
+    return ref;
 }
 
 } // namespace midi_config

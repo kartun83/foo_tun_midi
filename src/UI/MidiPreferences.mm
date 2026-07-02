@@ -13,6 +13,9 @@
 #include "../Core/MidiPreload.h"
 #if FOO_TUN_MIDI_CLAP
 #include "../Clap/ClapScanner.h"
+#include "../Clap/ClapPresets.h"
+#include <string>
+#include <vector>
 #endif
 #import "../PreferencesCommon.h"
 
@@ -32,7 +35,9 @@
 #if FOO_TUN_MIDI_CLAP
     NSPopUpButton *_enginePopup;
     NSPopUpButton *_clapPluginPopup;
+    NSPopUpButton *_clapPresetPopup;
     NSTextField *_clapStatusLabel;
+    std::vector<foo_midi::ClapPreset> _clapPresets;   // maps popup index -> preset
 #endif
 }
 @end
@@ -51,7 +56,7 @@
 - (void)loadView {
     CGFloat height = 380;
 #if FOO_TUN_MIDI_CLAP
-    height = 524;   // room for the Engine section
+    height = 596;   // room for the Engine section (incl. preset row)
 #endif
     MidiFlippedView *view = [[MidiFlippedView alloc] initWithFrame:NSMakeRect(0, 0, 480, height)];
     self.view = view;
@@ -107,6 +112,26 @@
     [self.view addSubview:rescan];
     y += 30;
 
+    // Preset row: headless preset switching for plugins that ship a CLAP
+    // preset-discovery provider. Populated on demand (the "Presets" button loads
+    // the selected plugin to read its preset list).
+    NSTextField *presetLabel = JLCreateHelperText(@"Preset:");
+    presetLabel.frame = NSMakeRect(labelX, y + 4, 100, 16);
+    [self.view addSubview:presetLabel];
+
+    _clapPresetPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(labelX + 104, y, 236, 26)];
+    [_clapPresetPopup setTarget:self];
+    [_clapPresetPopup setAction:@selector(clapPresetChanged:)];
+    [self.view addSubview:_clapPresetPopup];
+
+    NSButton *loadPresets = [[NSButton alloc] initWithFrame:NSMakeRect(370, y - 1, 90, 26)];
+    loadPresets.bezelStyle = NSBezelStyleRounded;
+    loadPresets.title = @"Presets";
+    [loadPresets setTarget:self];
+    [loadPresets setAction:@selector(loadPresetsClicked:)];
+    [self.view addSubview:loadPresets];
+    y += 30;
+
     _clapStatusLabel = JLCreateHelperText(@"");
     _clapStatusLabel.frame = NSMakeRect(labelX, y, 440, 16);
     [self.view addSubview:_clapStatusLabel];
@@ -114,16 +139,19 @@
 
     NSTextField *engHint = JLCreateHelperText(
         @"CLAP hosts a single instrument plugin to preview a pattern (no seeking; "
-        @"the plugin owns its own sound). The list is scanned from your installed "
-        @"CLAP plugins — use Rescan after installing new ones. FluidSynth uses the "
-        @"SoundFont below. Takes effect on the next track you play.");
-    engHint.frame = NSMakeRect(labelX, y, 450, 56);
-    engHint.maximumNumberOfLines = 4;
+        @"the plugin owns its own sound). The list is cached — only Rescan/Presets "
+        @"load plugins, which raises memory use until foobar2000 restarts, so use "
+        @"them sparingly. Presets works only for plugins that expose a preset "
+        @"provider (many use their own browser). FluidSynth uses the SoundFont "
+        @"below. Takes effect on the next track you play.");
+    engHint.frame = NSMakeRect(labelX, y, 450, 88);
+    engHint.maximumNumberOfLines = 6;
     [engHint.cell setWraps:YES];
     [self.view addSubview:engHint];
-    y += 62;
+    y += 94;
 
     [self populateClapPopupRescan:NO];
+    [self rebuildPresetPopupDiscover:NO];
 #endif
 
     NSTextField *header = JLCreateSectionHeader(@"SoundFont");
@@ -332,6 +360,93 @@
 
 - (void)clapPluginChanged:(id)sender {
     [self saveClapSelection:_clapPluginPopup.indexOfSelectedItem];
+    // The saved preset belonged to the previous plugin — clear it and reset the
+    // preset dropdown to the new plugin's default.
+    midi_config::setConfigString(midi_config::kKeyClapPreset, "");
+    midi_config::setConfigString(midi_config::kKeyClapPresetName, "");
+    _clapPresets.clear();
+    [self rebuildPresetPopupDiscover:NO];
+}
+
+// Rebuild the preset dropdown. When `discover` is YES the selected plugin is
+// loaded (metadata only, no DSP instance) to read its preset-discovery provider;
+// otherwise only the "Default" item (plus the saved preset's name, if any) is
+// shown so opening Preferences stays cheap.
+- (void)rebuildPresetPopupDiscover:(BOOL)discover {
+    [_clapPresetPopup removeAllItems];
+
+    // Item 0: no preset — the plugin loads its own default patch.
+    NSMenuItem *def = [[NSMenuItem alloc] initWithTitle:@"Default (plugin's own patch)"
+                                                 action:nil keyEquivalent:@""];
+    def.representedObject = nil;
+    [[_clapPresetPopup menu] addItem:def];
+
+    midi_config::ClapPresetRef saved = midi_config::clapPreset();
+    std::string savedName = midi_config::getConfigString(midi_config::kKeyClapPresetName, "");
+
+    if (discover) {
+        _clapPresets.clear();
+        foo_midi::ClapPresetList pl = foo_midi::discoverClapPresets(
+            midi_config::clapPluginPath(), midi_config::clapPluginId());
+        _clapPresets = pl.presets;
+        if (!pl.supported) {
+            NSMenuItem *ns = [[NSMenuItem alloc]
+                initWithTitle:@"— plugin has no host-switchable presets —"
+                       action:nil keyEquivalent:@""];
+            ns.enabled = NO;
+            [[_clapPresetPopup menu] addItem:ns];
+        } else if (_clapPresets.empty()) {
+            NSMenuItem *ns = [[NSMenuItem alloc] initWithTitle:@"— no presets found —"
+                                                        action:nil keyEquivalent:@""];
+            ns.enabled = NO;
+            [[_clapPresetPopup menu] addItem:ns];
+        }
+    }
+
+    NSInteger sel = 0;
+    for (size_t i = 0; i < _clapPresets.size(); ++i) {
+        NSString *t = [NSString stringWithUTF8String:_clapPresets[i].name.c_str()];
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:t action:nil keyEquivalent:@""];
+        item.representedObject = @((NSInteger)i);
+        [[_clapPresetPopup menu] addItem:item];
+        if (saved.valid && _clapPresets[i].location == saved.location &&
+            _clapPresets[i].loadKey == saved.loadKey)
+            sel = _clapPresetPopup.numberOfItems - 1;
+    }
+
+    // A preset is saved but we haven't discovered the list (cheap open): surface
+    // its name as a placeholder so the user sees the current choice. Selecting it
+    // is a no-op (representedObject @(-1) = keep).
+    if (saved.valid && sel == 0 && _clapPresets.empty() && !savedName.empty()) {
+        NSMenuItem *item = [[NSMenuItem alloc]
+            initWithTitle:[NSString stringWithUTF8String:savedName.c_str()]
+                   action:nil keyEquivalent:@""];
+        item.representedObject = @(-1);
+        [[_clapPresetPopup menu] addItem:item];
+        sel = _clapPresetPopup.numberOfItems - 1;
+    }
+    [_clapPresetPopup selectItemAtIndex:sel];
+}
+
+- (void)loadPresetsClicked:(id)sender {
+    if (midi_config::clapPluginPath().empty()) return;
+    [self rebuildPresetPopupDiscover:YES];
+}
+
+- (void)clapPresetChanged:(id)sender {
+    NSMenuItem *item = _clapPresetPopup.selectedItem;
+    id rep = item.representedObject;
+    if (rep == nil) {   // "Default": clear the preset
+        midi_config::setConfigString(midi_config::kKeyClapPreset, "");
+        midi_config::setConfigString(midi_config::kKeyClapPresetName, "");
+        return;
+    }
+    NSInteger idx = [rep integerValue];
+    if (idx < 0 || idx >= (NSInteger)_clapPresets.size()) return;   // placeholder = keep
+    const foo_midi::ClapPreset& p = _clapPresets[(size_t)idx];
+    std::string packed = std::to_string(p.locationKind) + "\t" + p.location + "\t" + p.loadKey;
+    midi_config::setConfigString(midi_config::kKeyClapPreset, packed.c_str());
+    midi_config::setConfigString(midi_config::kKeyClapPresetName, p.name.c_str());
 }
 
 - (void)rescanClapClicked:(id)sender {

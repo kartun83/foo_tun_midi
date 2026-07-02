@@ -42,6 +42,13 @@ public:
     bool init(const std::string& pluginPath, const std::string& pluginId,
               int sampleRate, const SMFInfo& smf);
 
+    // Optional: a preset to load once the plugin is instantiated (headless preset
+    // switch via the preset-load extension). Call before init(). `location` is a
+    // file path (FILE kind) or empty (PLUGIN kind); `loadKey` may be empty. No-op
+    // if the plugin doesn't implement preset-load.
+    void setPreset(uint32_t locationKind, const std::string& location,
+                   const std::string& loadKey);
+
     int sampleRate() const override;
     bool supportsSeek() const override { return false; }
     void seek(double /*seconds*/) override {}   // non-seekable by design

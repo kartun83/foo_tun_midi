@@ -12,6 +12,7 @@
 #include "../fb2k_sdk.h"   // console::*
 
 #include <clap/clap.h>
+#include <clap/ext/preset-load.h>
 #include <dlfcn.h>
 
 #include <algorithm>
@@ -67,6 +68,11 @@ struct ClapRenderer::Impl {
     bool sendMidi = true;         // MIDI vs CLAP note dialect
     static constexpr uint32_t kMaxBlock = 4096;
 
+    // optional preset to load after instantiation (headless preset switch)
+    bool presetSet = false;
+    uint32_t presetKind = 0;
+    std::string presetLocation, presetLoadKey;
+
     // bus buffers (one channel buffer per declared channel; port views over them)
     std::vector<std::vector<float>> inStore, outStore;
     std::vector<std::vector<float*>> inPtrs, outPtrs;
@@ -120,6 +126,15 @@ ClapRenderer::ClapRenderer() : m_impl(std::make_unique<Impl>()) {}
 ClapRenderer::~ClapRenderer() = default;
 
 int ClapRenderer::sampleRate() const { return m_impl->sampleRate; }
+
+void ClapRenderer::setPreset(uint32_t locationKind, const std::string& location,
+                             const std::string& loadKey) {
+    Impl& d = *m_impl;
+    d.presetSet = true;
+    d.presetKind = locationKind;
+    d.presetLocation = location;
+    d.presetLoadKey = loadKey;
+}
 
 bool ClapRenderer::init(const std::string& pluginPath, const std::string& pluginId,
                         int sampleRate, const SMFInfo& smf) {
@@ -207,6 +222,24 @@ bool ClapRenderer::init(const std::string& pluginPath, const std::string& plugin
             bool clapOk = info.supported_dialects & CLAP_NOTE_DIALECT_CLAP;
             bool midiOk = info.supported_dialects & CLAP_NOTE_DIALECT_MIDI;
             if (clapOk && !midiOk) d.sendMidi = false;
+        }
+    }
+
+    // Headless preset switch: if a preset is configured and the plugin exposes
+    // the preset-load extension, load it now (main-thread call; we're single-
+    // threaded and not yet processing). Best-effort — a plugin without the
+    // extension just keeps its default patch.
+    if (d.presetSet) {
+        auto* pl = (const clap_plugin_preset_load_t*)d.plugin->get_extension(d.plugin, CLAP_EXT_PRESET_LOAD);
+        if (!pl) pl = (const clap_plugin_preset_load_t*)d.plugin->get_extension(d.plugin, CLAP_EXT_PRESET_LOAD_COMPAT);
+        if (pl) {
+            const char* loc = d.presetLocation.empty() ? nullptr : d.presetLocation.c_str();
+            const char* key = d.presetLoadKey.empty() ? nullptr : d.presetLoadKey.c_str();
+            if (!pl->from_location(d.plugin, d.presetKind, loc, key))
+                console::warning("foo_tun_midi: CLAP preset load failed (plugin rejected it)");
+        } else {
+            console::warning("foo_tun_midi: selected CLAP plugin has no preset-load "
+                             "extension; playing its default patch");
         }
     }
 

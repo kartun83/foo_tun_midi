@@ -45,7 +45,11 @@ void inspectBundle(const std::string& bundlePath, std::vector<ClapPluginEntry>& 
     std::string leaf = fs::path(bundlePath).stem().string();  // name without .clap
     std::string bin = bundlePath + "/Contents/MacOS/" + leaf;
 
-    void* dl = dlopen(bin.c_str(), RTLD_LOCAL | RTLD_NOW);
+    // RTLD_LAZY (not NOW): we only read descriptors, so don't eagerly resolve or
+    // page in the whole plugin. macOS won't unload an Obj-C/JUCE image on dlclose,
+    // so each scanned bundle stays resident for the session — keep the per-bundle
+    // cost as low as possible and rely on the persisted cache to avoid rescans.
+    void* dl = dlopen(bin.c_str(), RTLD_LOCAL | RTLD_LAZY);
     if (!dl) return;
 
     auto* entry = (const clap_plugin_entry_t*)dlsym(dl, "clap_entry");
